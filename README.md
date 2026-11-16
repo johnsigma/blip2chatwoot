@@ -124,6 +124,33 @@ stays visible, while the conversation's assignee shows who is answering now.
 A Chatwoot failure while assigning is logged and retried on the agent's next message;
 it never blocks the mirror.
 
+### Captain sessions started by a BLiP icebreaker
+
+Chatwoot's Captain (AI assistant) only answers `pending` conversations, and the bridge normally opens
+them. To let the Captain attend customers who send a campaign icebreaker while BLiP keeps them in a
+silent sub-bot:
+
+- `CAPTAIN_TRIGGER_PHRASES`: exact icebreaker phrases, `|`-separated (case and repeated spaces are
+  ignored). Empty turns the whole feature off.
+- `CAPTAIN_SESSION_LABELS`: comma-separated labels added at the icebreaker.
+- `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
+  `mysubbot@msging.net`). Required with the phrases.
+- `CAPTAIN_REPLIES_TO_BLIP`: forward the Captain's public messages (sender
+  `captain_assistant`) to the customer. Independent of `CHATWOOT_REPLIES_TO_BLIP` and its allow-list,
+  which keep covering human agents.
+
+When a customer sends an icebreaker, the bridge adds the labels, puts the conversation in `pending`
+and marks the mapping as a Captain session, all **before** posting the message, so the Captain
+answers the icebreaker itself. Later customer messages in that conversation, when it isn't open
+(the Captain resolved it), read the router's `master-state` (`get /contexts/<customer>/master-state`
+with `BLIP_AUTH_KEY`, which must be the router's key): while the customer is still in the sub-bot the
+conversation goes back to `pending`; otherwise (BLiP expiry, an exit handled by BLiP) the session ends
+and it opens for the agents as usual. If BLiP can't be read, the Captain keeps the conversation. An
+open conversation (after the Captain's handoff) is left alone. The Captain's messages are sent as
+`text/plain` with its Markdown turned into WhatsApp formatting (`**bold**` → `*bold*`, links as
+`text: url`). Moving the customer out of the sub-bot when the Captain hands off or ends is not the
+bridge's job (it's done by whatever reacts to the Captain's labels).
+
 ## BLiP configuration
 
 Point the BLiP webhook at the unified endpoint, which accepts everything BLiP sends

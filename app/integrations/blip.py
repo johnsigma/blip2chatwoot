@@ -12,6 +12,8 @@ from app.integrations.errors import IntegrationError
 _DESK_NODE_SUFFIX = "@desk.msging.net"
 _ATTENDANT_PAGE_SIZE = 100
 _MAX_ATTENDANT_PAGES = 20
+# BLiP command failure code for a resource (e.g. a context variable) that doesn't exist.
+_RESOURCE_NOT_FOUND = 67
 
 
 class BlipClient:
@@ -95,6 +97,35 @@ class BlipClient:
                 retryable=False,
             )
         return response
+
+    async def get_master_state(self, customer_identity: str) -> str | None:
+        """The sub-bot the router has the customer in (its `master-state` context variable).
+
+        None when the variable doesn't exist, i.e. the customer is in the router's main flow.
+        Needs the router's key in BLIP_AUTH_KEY: the variable belongs to the router.
+        """
+        payload = {
+            "id": str(uuid4()),
+            "to": "postmaster@msging.net",
+            "method": "get",
+            "uri": f"/contexts/{quote(customer_identity, safe='@._-')}/master-state",
+        }
+        try:
+            response = await self._post(self.commands_url, payload)
+        except IntegrationError as exc:
+            if exc.status_code == 404:
+                return None
+            raise
+        if response.get("status") == "failure":
+            reason = response.get("reason") or {}
+            if reason.get("code") == _RESOURCE_NOT_FOUND:
+                return None
+            raise IntegrationError(
+                f"BLiP master-state lookup failed: {reason.get('description', 'unknown error')}",
+                retryable=False,
+            )
+        resource = response.get("resource")
+        return resource if isinstance(resource, str) and resource else None
 
     async def create_shadow_ticket(self, customer_identity: str) -> str:
         uri_identity = quote(customer_identity, safe="@._-")

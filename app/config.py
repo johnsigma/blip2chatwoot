@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +25,20 @@ class Settings(BaseSettings):
     # Assign each conversation to the BLiP Desk agent who last wrote in it, creating that agent's
     # Chatwoot user when missing (Chatwoot e-mails them an invitation). Only calls Chatwoot.
     chatwoot_agent_sync: bool = False
+    # Captain (the Chatwoot AI assistant) sessions started by a BLiP icebreaker; empty = off.
+    # "|"-separated exact phrases (case and repeated spaces ignored). When a customer sends one, the
+    # conversation gets CAPTAIN_SESSION_LABELS and goes `pending` *before* the message is posted, so
+    # the Captain answers it. Needs the BLiP router key in BLIP_AUTH_KEY (reads `master-state`).
+    captain_trigger_phrases: str = ""
+    # Comma-separated labels added at the icebreaker (e.g. "camila,bot-venda-inicio").
+    captain_session_labels: str = ""
+    # Router `master-state` value meaning "the customer is in the Captain's (silent) sub-bot".
+    # A customer message in a Captain conversation that isn't open keeps it `pending` only while
+    # the router still has the customer there; otherwise the session ends and it opens as usual.
+    captain_blip_subbot: str = ""
+    # Forward the Captain's public messages to BLiP, only in conversations with an active session.
+    # Independent of CHATWOOT_REPLIES_TO_BLIP, which covers human agents.
+    captain_replies_to_blip: bool = False
 
     blip_contract_id: str = ""
     blip_auth_key: str = ""
@@ -70,6 +84,27 @@ class Settings(BaseSettings):
             )
         return value
 
+    @model_validator(mode="after")
+    def _captain_needs_subbot(self) -> "Settings":
+        # Without the sub-bot every returning customer would be treated as having left the Captain.
+        if self.captain_trigger_phrase_set and not self.captain_blip_subbot.strip():
+            raise ValueError("CAPTAIN_BLIP_SUBBOT is required when CAPTAIN_TRIGGER_PHRASES is set")
+        return self
+
+    @property
+    def captain_trigger_phrase_set(self) -> frozenset[str]:
+        phrases = (normalize_phrase(item) for item in self.captain_trigger_phrases.split("|"))
+        return frozenset(phrase for phrase in phrases if phrase)
+
+    @property
+    def captain_enabled(self) -> bool:
+        return bool(self.captain_trigger_phrase_set)
+
+    @property
+    def captain_session_label_list(self) -> list[str]:
+        labels = (item.strip() for item in self.captain_session_labels.split(","))
+        return list(dict.fromkeys(label for label in labels if label))
+
     @property
     def chatwoot_reply_conversation_ids(self) -> frozenset[int]:
         items = (item.strip() for item in self.chatwoot_replies_allowed_conversations.split(","))
@@ -83,6 +118,8 @@ class Settings(BaseSettings):
             or self.chatwoot_replies_to_blip
             or self.blip_ticket_tag_sync_enabled
             or self.blip_agent_name_lookup
+            or self.captain_enabled
+            or self.captain_replies_to_blip
         )
 
     @property
@@ -118,6 +155,11 @@ class Settings(BaseSettings):
             raise ValueError("Worker polling and HTTP timeout values must be positive")
         if self.blip_media_max_bytes <= 0:
             raise ValueError("BLIP_MEDIA_MAX_BYTES must be positive")
+
+
+def normalize_phrase(text: str) -> str:
+    """Icebreaker comparison key: case-insensitive, surrounding and repeated spaces ignored."""
+    return " ".join(text.split()).casefold()
 
 
 @lru_cache
