@@ -104,6 +104,17 @@ def test_captain_phrases_require_the_subbot() -> None:
         Settings(_env_file=None, captain_trigger_phrases="Resgatar meu cupom.")
 
 
+def test_follow_master_state_enables_the_captain_and_needs_the_subbot() -> None:
+    with pytest.raises(ValidationError, match="CAPTAIN_BLIP_SUBBOT"):
+        Settings(_env_file=None, captain_follow_master_state=True)
+    settings = Settings(
+        _env_file=None, captain_follow_master_state=True, captain_blip_subbot=SUBBOT
+    )
+    assert settings.captain_enabled
+    assert settings.blip_writes_enabled
+    assert not settings.captain_trigger_phrase_set
+
+
 # --- icebreaker ----------------------------------------------------------------------------
 
 
@@ -312,6 +323,138 @@ async def test_conversation_without_session_reopens_as_before(
         await _process(session, captain_settings, blip, chatwoot, _customer_event("oi"))
         blip.get_master_state.assert_not_awaited()
         chatwoot.toggle_status.assert_awaited_once_with(conversation_id=200, status="open")
+
+
+# --- BLiP decides (night window): CAPTAIN_FOLLOW_MASTER_STATE ----------------------------------
+
+
+@pytest.fixture
+def follow_settings(captain_settings: Settings) -> Settings:
+    captain_settings.captain_follow_master_state = True
+    return captain_settings
+
+
+@pytest.mark.asyncio
+async def test_any_text_starts_the_session_while_the_router_has_the_customer_in_the_subbot(
+    session_factory, follow_settings
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot(conversation_status="open")
+    async with session_factory() as session:
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("boa noite"))
+
+        mapping = await session.scalar(select(ConversationMapping))
+        blip.get_master_state.assert_awaited_once_with(CUSTOMER)
+        assert mapping.captain_active is True
+        assert mapping.status == "pending"
+        chatwoot.toggle_status.assert_awaited_once_with(conversation_id=200, status="pending")
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=200, labels=["camila", "bot-venda-inicio"]
+        )
+        names = [name for name, *_ in chatwoot.mock_calls]
+        assert names.index("toggle_status") < names.index("create_message")
+
+
+@pytest.mark.asyncio
+async def test_new_conversation_of_a_customer_in_the_subbot_is_not_opened(
+    session_factory, follow_settings
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot(conversation_status="pending")
+    async with session_factory() as session:
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("boa noite"))
+        # created pending by Chatwoot and kept pending: the only status change is none
+        chatwoot.toggle_status.assert_not_awaited()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.status == "pending"
+        assert mapping.captain_active is True
+
+
+@pytest.mark.asyncio
+async def test_resolved_conversation_of_a_customer_back_in_the_subbot_goes_pending(
+    session_factory, follow_settings
+) -> None:
+    """Next night: the Captain resolved the last conversation and BLiP sends the customer again."""
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot()
+    async with session_factory() as session:
+        session.add(_mapping(follow_settings, status="resolved"))
+        await session.commit()
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("oi"))
+
+        mapping = await session.scalar(select(ConversationMapping))
+        chatwoot.toggle_status.assert_awaited_once_with(conversation_id=200, status="pending")
+        assert mapping.captain_active is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", [None, "puccampinascomercial@msging.net"])
+async def test_customer_outside_the_subbot_is_handled_as_before(
+    session_factory, follow_settings, state
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = state
+    chatwoot = _chatwoot(conversation_status="pending")
+    async with session_factory() as session:
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("oi"))
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.captain_active is False
+        assert mapping.status == "open"
+        chatwoot.add_conversation_labels.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_state_starts_no_session_and_still_mirrors(
+    session_factory, follow_settings
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.side_effect = IntegrationError("down", retryable=True, status_code=503)
+    chatwoot = _chatwoot(conversation_status="pending")
+    async with session_factory() as session:
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("oi"))
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.captain_active is False
+        chatwoot.create_message.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_state_read_when_a_session_is_active_or_the_message_was_already_posted(
+    session_factory, follow_settings
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    chatwoot = _chatwoot()
+    async with session_factory() as session:
+        session.add(_mapping(follow_settings, status="open", captain_active=True))
+        await session.commit()
+        await _process(session, follow_settings, blip, chatwoot, _customer_event("oi", "m-1"))
+        retry = _customer_event("oi", "m-2")
+        retry.result_id = "300"
+        await _process(session, follow_settings, blip, chatwoot, retry)
+        blip.get_master_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bot_messages_never_trigger_the_state_read(session_factory, follow_settings) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    chatwoot = _chatwoot()
+    async with session_factory() as session:
+        session.add(_mapping(follow_settings, status="open"))
+        event = _customer_event("Olá!")
+        event.payload = {**event.payload, "from": "mybot@msging.net/instance", "to": CUSTOMER}
+        await _process(session, follow_settings, blip, chatwoot, event)
+        blip.get_master_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_state_is_not_read_when_the_switch_is_off(session_factory, captain_settings) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    chatwoot = _chatwoot(conversation_status="pending")
+    async with session_factory() as session:
+        await _process(session, captain_settings, blip, chatwoot, _customer_event("oi"))
+        blip.get_master_state.assert_not_awaited()
 
 
 # --- Captain replies -----------------------------------------------------------------------

@@ -28,7 +28,7 @@ messages as `incoming`, bot and BLiP Desk agent messages as `outgoing` posted wi
 `Settings.blip_writes_enabled`): `BLIP_ACK_MESSAGES` (`consumed`/`failed` notifications),
 `CHATWOOT_REPLIES_TO_BLIP` (public agent replies → BLiP), `BLIP_TICKET_TAG_SYNC_ENABLED` (labels ⇄
 Desk ticket tags), `BLIP_AGENT_NAME_LOOKUP` (read-only `get /attendants`) and the Captain settings
-(`CAPTAIN_TRIGGER_PHRASES` reads the router `master-state`; `CAPTAIN_REPLIES_TO_BLIP`). Any new code that calls
+(`CAPTAIN_TRIGGER_PHRASES` and `CAPTAIN_FOLLOW_MASTER_STATE` read the router `master-state`; `CAPTAIN_REPLIES_TO_BLIP`). Any new code that calls
 `BlipClient` must sit behind one of them. Commands to `postmaster@desk.msging.net` use
 `BLIP_DESK_AUTH_KEY` when set (the main bot's key may have no Desk configured), else `BLIP_AUTH_KEY`.
 Two processes share one database and communicate only through it.
@@ -94,7 +94,7 @@ Two processes share one database and communicate only through it.
   Chatwoot returned and `_open_pending_conversation` toggles `pending` to `open`; if that fails the mapping
   stays `pending` and the customer's next message reopens it. Other statuses (e.g. `resolved` for a
   blocked contact) are left alone.
-- **Captain sessions** (`CAPTAIN_*`, off while `CAPTAIN_TRIGGER_PHRASES` is empty): an inbound
+- **Captain sessions** (`CAPTAIN_*`, off while `CAPTAIN_TRIGGER_PHRASES` is empty and `CAPTAIN_FOLLOW_MASTER_STATE` is false): an inbound
   `text/plain` equal to a phrase (`normalize_phrase`) makes `process_blip_message` run
   `_start_captain_session` *before* `_mirror_message` (labels, `pending`, `ConversationMapping.captain_active`),
   and `_create_mapping(keep_pending=True)` skips `_open_pending_conversation`; skipped on a retry once
@@ -103,7 +103,10 @@ Two processes share one database and communicate only through it.
   `BlipClient.get_master_state` is `CAPTAIN_BLIP_SUBBOT` (an unreadable state keeps the Captain), else ends
   the session and opens it. `_process_chatwoot_message` forwards `sender.type == "captain_assistant"` public
   messages only with `CAPTAIN_REPLIES_TO_BLIP` and an active session (not subject to the agents' allow-list),
-  converted by `app/services/whatsapp_format.py`.
+  converted by `app/services/whatsapp_format.py`. With `CAPTAIN_FOLLOW_MASTER_STATE` the session also starts
+  for any inbound message (not just a phrase) when the customer has no active session and
+  `_captain_state` finds the router `master-state` at `CAPTAIN_BLIP_SUBBOT` (BLiP owns the decision, e.g. a
+  night window); unreadable = no session (unlike `_reopen_for_customer`, where unreadable keeps it).
 
 **Webhook auth**: Chatwoot uses an HMAC signature + timestamp (`app/security.py`), enforced only if
 `CHATWOOT_WEBHOOK_SECRET` is set. BLiP has no signature, so it uses a route path token (or

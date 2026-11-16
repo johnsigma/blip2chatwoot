@@ -134,7 +134,11 @@ silent sub-bot:
   ignored). Empty turns the whole feature off.
 - `CAPTAIN_SESSION_LABELS`: comma-separated labels added at the icebreaker.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
-  `mysubbot@msging.net`). Required with the phrases.
+  `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
+- `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router
+  has the customer in `CAPTAIN_BLIP_SUBBOT` (e.g. a night window BLiP turns on and off on its side),
+  not only for the phrases. Costs one `master-state` read per customer message that has no active
+  session; an unreadable state starts nothing and the next message tries again.
 - `CAPTAIN_REPLIES_TO_BLIP`: forward the Captain's public messages (sender
   `captain_assistant`) to the customer. Independent of `CHATWOOT_REPLIES_TO_BLIP` and its allow-list,
   which keep covering human agents.

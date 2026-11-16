@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     # A customer message in a Captain conversation that isn't open keeps it `pending` only while
     # the router still has the customer there; otherwise the session ends and it opens as usual.
     captain_blip_subbot: str = ""
+    # Also start a session for any customer message while the router has the customer in
+    # CAPTAIN_BLIP_SUBBOT, not only for the icebreaker phrases (e.g. a night window that BLiP turns
+    # on and off on its side). One `master-state` read per customer message that has no active
+    # session. An unreadable state starts nothing; the next message tries again.
+    captain_follow_master_state: bool = False
     # Forward the Captain's public messages to BLiP, only in conversations with an active session.
     # Independent of CHATWOOT_REPLIES_TO_BLIP, which covers human agents.
     captain_replies_to_blip: bool = False
@@ -87,8 +92,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _captain_needs_subbot(self) -> "Settings":
         # Without the sub-bot every returning customer would be treated as having left the Captain.
-        if self.captain_trigger_phrase_set and not self.captain_blip_subbot.strip():
-            raise ValueError("CAPTAIN_BLIP_SUBBOT is required when CAPTAIN_TRIGGER_PHRASES is set")
+        if self.captain_enabled and not self.captain_blip_subbot.strip():
+            raise ValueError(
+                "CAPTAIN_BLIP_SUBBOT is required when CAPTAIN_TRIGGER_PHRASES or "
+                "CAPTAIN_FOLLOW_MASTER_STATE is set"
+            )
         return self
 
     @property
@@ -98,7 +106,7 @@ class Settings(BaseSettings):
 
     @property
     def captain_enabled(self) -> bool:
-        return bool(self.captain_trigger_phrase_set)
+        return bool(self.captain_trigger_phrase_set) or self.captain_follow_master_state
 
     @property
     def captain_session_label_list(self) -> list[str]:

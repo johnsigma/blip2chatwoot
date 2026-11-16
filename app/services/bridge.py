@@ -102,6 +102,16 @@ class BridgeService:
         lock = _MAPPING_LOCKS.setdefault(customer_identity, asyncio.Lock())
         async with lock:
             mapping = await self._get_mapping(customer_identity)
+            if (
+                not captain_trigger
+                and direction == "inbound"
+                and self.settings.captain_follow_master_state
+                and event.result_id is None
+                and not (mapping and mapping.captain_active)
+            ):
+                # BLiP decides who is with the Captain (icebreaker, night window, ...): follow it.
+                in_captain = await self._captain_state(customer_identity, ref=message.id)
+                captain_trigger = in_captain is True
             if not mapping:
                 mapping = await self._create_mapping(
                     customer_identity, keep_pending=captain_trigger
@@ -665,17 +675,21 @@ class BridgeService:
         await self.session.commit()
 
     async def _customer_still_with_captain(self, mapping: ConversationMapping) -> bool:
+        # Unknown: keep the Captain, so the customer is answered (at worst twice) rather than
+        # left in a silent sub-bot with nobody reading the conversation.
+        return await self._captain_state(
+            mapping.blip_customer_identity, ref=f"mapping {mapping.id}"
+        ) is not False
+
+    async def _captain_state(self, customer_identity: str, *, ref: str) -> bool | None:
+        """Whether the router has the customer in the Captain's sub-bot; None when unreadable."""
         try:
-            state = await self.blip.get_master_state(mapping.blip_customer_identity)
+            state = await self.blip.get_master_state(customer_identity)
         except IntegrationError as exc:
-            # Unknown: keep the Captain, so the customer is answered (at worst twice) rather than
-            # left in a silent sub-bot with nobody reading the conversation.
             logger.warning(
-                "Could not read the BLiP master-state of mapping %s (HTTP %s); keeping the Captain",
-                mapping.id,
-                exc.status_code,
+                "Could not read the BLiP master-state (%s, HTTP %s)", ref, exc.status_code
             )
-            return True
+            return None
         subbot = self.settings.captain_blip_subbot.strip().lower()
         return bool(state) and state.partition("/")[0].strip().lower() == subbot
 
