@@ -108,6 +108,8 @@ Two processes share one database and communicate only through it.
   and `_captain_state` finds the router `master-state` at `CAPTAIN_BLIP_SUBBOT` (BLiP owns the decision, e.g. a
   night window; the read is capped at 5 s); unreadable = no session (unlike `_reopen_for_customer`, where
   unreadable keeps it). An icebreaker moves even an `open` conversation to `pending`.
+  `_start_captain_session` also drops labels matching `CAPTAIN_SESSION_RESET_LABEL_PREFIXES` (the conversation is
+  reused, and a stale `saida-*` label would fire the exit automation on the next resolve).
 
 **Webhook auth**: Chatwoot uses an HMAC signature + timestamp (`app/security.py`), enforced only if
 `CHATWOOT_WEBHOOK_SECRET` is set. BLiP has no signature, so it uses a route path token (or

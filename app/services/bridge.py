@@ -639,16 +639,26 @@ class BridgeService:
         """
         conversation_id = mapping.chatwoot_conversation_id
         labels = self.settings.captain_session_label_list
-        if labels:
+        prefixes = tuple(self.settings.captain_session_reset_prefix_list)
+        if labels or prefixes:
             current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
-            missing = [label for label in labels if label not in current]
-            if missing:
-                await self.chatwoot.ensure_labels(missing)
+            # The conversation is reused across sessions: drop what an earlier one left behind
+            # (exit and funnel labels) before the new session's labels are added.
+            kept = [
+                label
+                for label in current
+                if label in labels or not (prefixes and label.startswith(prefixes))
+            ]
+            target = self._unique(kept + labels)
+            if sorted(target) != sorted(current):
+                missing = [label for label in labels if label not in current]
+                if missing:
+                    await self.chatwoot.ensure_labels(missing)
                 await self.chatwoot.add_conversation_labels(
                     conversation_id=conversation_id,
-                    labels=self._unique(current + missing),
+                    labels=target,
                 )
-            mapping.chatwoot_labels = self._unique(current + missing)
+            mapping.chatwoot_labels = target
         if mapping.status != "pending":
             await self.chatwoot.toggle_status(conversation_id=conversation_id, status="pending")
             mapping.status = "pending"

@@ -133,6 +133,10 @@ silent sub-bot:
 - `CAPTAIN_TRIGGER_PHRASES`: exact icebreaker phrases, `|`-separated (case and repeated spaces are
   ignored). Empty (and with `CAPTAIN_FOLLOW_MASTER_STATE` off) turns the whole feature off.
 - `CAPTAIN_SESSION_LABELS`: comma-separated labels added at the icebreaker.
+- `CAPTAIN_SESSION_RESET_LABEL_PREFIXES`: comma-separated label prefixes (e.g. `saida-,bot-venda-`)
+  removed when a new session starts. The customer's conversation is reused, so exit/funnel labels from
+  an earlier session would otherwise fire the exit automations again. Labels in
+  `CAPTAIN_SESSION_LABELS` are kept.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
   `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
 - `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router

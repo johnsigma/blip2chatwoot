@@ -353,6 +353,105 @@ async def test_conversation_without_session_reopens_as_before(
         chatwoot.toggle_status.assert_awaited_once_with(conversation_id=200, status="open")
 
 
+# --- labels left by an earlier session -----------------------------------------------------
+
+
+@pytest.fixture
+def reset_settings(captain_settings: Settings) -> Settings:
+    captain_settings.captain_session_reset_label_prefixes = " saida-, bot-venda- "
+    return captain_settings
+
+
+def test_reset_prefixes_are_parsed(reset_settings) -> None:
+    assert reset_settings.captain_session_reset_prefix_list == ["saida-", "bot-venda-"]
+    assert Settings(_env_file=None).captain_session_reset_prefix_list == []
+
+
+@pytest.mark.asyncio
+async def test_new_session_drops_the_exit_and_funnel_labels_of_the_previous_one(
+    session_factory, reset_settings
+) -> None:
+    """A stale `saida-sair` would otherwise fire the exit automation on the next resolve."""
+    chatwoot = _chatwoot(
+        labels=["vip", "saida-sair", "bot-venda-sem-interesse", "camila", "bot-venda-link-enviado"]
+    )
+    async with session_factory() as session:
+        session.add(_mapping(reset_settings, status="resolved"))
+        await session.commit()
+        await _process(
+            session, reset_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+
+        chatwoot.ensure_labels.assert_awaited_once_with(["bot-venda-inicio"])
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=200, labels=["vip", "camila", "bot-venda-inicio"]
+        )
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_labels == ["vip", "camila", "bot-venda-inicio"]
+        assert mapping.captain_active is True
+
+
+@pytest.mark.asyncio
+async def test_session_labels_matching_a_reset_prefix_are_kept(
+    session_factory, reset_settings
+) -> None:
+    chatwoot = _chatwoot(labels=["camila", "bot-venda-inicio"])
+    async with session_factory() as session:
+        session.add(_mapping(reset_settings, status="open"))
+        await session.commit()
+        await _process(
+            session, reset_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.add_conversation_labels.assert_not_awaited()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_labels == ["camila", "bot-venda-inicio"]
+
+
+@pytest.mark.asyncio
+async def test_without_reset_prefixes_old_labels_stay(session_factory, captain_settings) -> None:
+    chatwoot = _chatwoot(labels=["saida-sair"])
+    async with session_factory() as session:
+        session.add(_mapping(captain_settings, status="resolved"))
+        await session.commit()
+        await _process(
+            session, captain_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=200, labels=["saida-sair", "camila", "bot-venda-inicio"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_reset_works_with_only_prefixes_configured(session_factory, reset_settings) -> None:
+    reset_settings.captain_session_labels = ""
+    chatwoot = _chatwoot(labels=["saida-aluno", "vip"])
+    async with session_factory() as session:
+        session.add(_mapping(reset_settings, status="open"))
+        await session.commit()
+        await _process(
+            session, reset_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.ensure_labels.assert_not_awaited()
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=200, labels=["vip"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_retry_of_the_same_icebreaker_does_not_touch_labels_again(
+    session_factory, reset_settings
+) -> None:
+    chatwoot = _chatwoot(labels=["camila", "bot-venda-inicio"])
+    async with session_factory() as session:
+        session.add(_mapping(reset_settings, status="pending", captain_active=True))
+        await session.commit()
+        await _process(
+            session, reset_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.add_conversation_labels.assert_not_awaited()
+        chatwoot.ensure_labels.assert_not_awaited()
+
+
 # --- BLiP decides (night window): CAPTAIN_FOLLOW_MASTER_STATE ----------------------------------
 
 

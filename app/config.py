@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     captain_trigger_phrases: str = ""
     # Comma-separated labels added at the icebreaker (e.g. "camila,bot-venda-inicio").
     captain_session_labels: str = ""
+    # Comma-separated label prefixes (e.g. "saida-,bot-venda-") removed from the conversation when a
+    # new session starts. A customer's conversation is reused across sessions, so exit/funnel
+    # labels left by an earlier session would otherwise fire the exit automations again (a link
+    # sent today resolves the conversation and the stale `saida-*` label sends the customer away).
+    # Labels in CAPTAIN_SESSION_LABELS are kept even if they match.
+    captain_session_reset_label_prefixes: str = ""
     # Router `master-state` value meaning "the customer is in the Captain's (silent) sub-bot".
     # A customer message in a Captain conversation that isn't open keeps it `pending` only while
     # the router still has the customer there; otherwise the session ends and it opens as usual.
@@ -112,6 +118,11 @@ class Settings(BaseSettings):
     def captain_session_label_list(self) -> list[str]:
         labels = (item.strip() for item in self.captain_session_labels.split(","))
         return list(dict.fromkeys(label for label in labels if label))
+
+    @property
+    def captain_session_reset_prefix_list(self) -> list[str]:
+        prefixes = (item.strip() for item in self.captain_session_reset_label_prefixes.split(","))
+        return list(dict.fromkeys(prefix for prefix in prefixes if prefix))
 
     @property
     def chatwoot_reply_conversation_ids(self) -> frozenset[int]:
