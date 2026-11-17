@@ -455,6 +455,212 @@ async def test_retry_of_the_same_icebreaker_does_not_touch_labels_again(
 # --- BLiP decides (night window): CAPTAIN_FOLLOW_MASTER_STATE ----------------------------------
 
 
+# --- a new conversation per session ------------------------------------------------------------
+
+HISTORY = [{"id": 1, "message_type": 0, "content": "Resgatar meu cupom."}]
+
+
+@pytest.fixture
+def per_session_settings(captain_settings: Settings) -> Settings:
+    captain_settings.captain_new_conversation_per_session = True
+    return captain_settings
+
+
+def _chatwoot_with_history(*, new_status: str = "pending"):
+    chatwoot = _chatwoot()
+    chatwoot.get_messages.return_value = list(HISTORY)
+    chatwoot.create_conversation.return_value = {"id": 201, "status": new_status}
+    return chatwoot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "captain_active"),
+    [
+        ("resolved", False),  # the session ended and nobody wrote since
+        ("resolved", True),  # left by an n8n exit: the flag is only cleared on the next message
+        ("open", False),  # the customer wrote to the main bot and the conversation reopened
+        ("open", True),  # handed to an agent
+    ],
+)
+async def test_new_session_gets_a_new_conversation(
+    session_factory, per_session_settings, status, captain_active
+) -> None:
+    chatwoot = _chatwoot_with_history()
+    async with session_factory() as session:
+        session.add(
+            _mapping(
+                per_session_settings,
+                status=status,
+                captain_active=captain_active,
+                chatwoot_labels=["saida-sair", "bot-venda-link-enviado"],
+                blip_agent_identity="ana@blip.ai",
+            )
+        )
+        await session.commit()
+        await _process(
+            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+
+        chatwoot.create_conversation.assert_awaited_once_with(
+            source_id="source-1", contact_id=100
+        )
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_conversation_id == 201
+        assert mapping.status == "pending"
+        assert mapping.captain_active is True
+        assert mapping.chatwoot_labels == ["camila", "bot-venda-inicio"]
+        assert mapping.blip_agent_identity is None
+        # Nothing is removed from the old conversation; everything goes to the new one.
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=201, labels=["camila", "bot-venda-inicio"]
+        )
+        assert chatwoot.create_message.await_args.kwargs["conversation_id"] == 201
+        chatwoot.toggle_status.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_icebreaker_repeated_mid_session_stays_in_the_same_conversation(
+    session_factory, per_session_settings
+) -> None:
+    per_session_settings.captain_session_reset_label_prefixes = "saida-,bot-venda-"
+    chatwoot = _chatwoot_with_history()
+    chatwoot.get_conversation_labels.return_value = ["camila", "bot-venda-pre-inscricao"]
+    async with session_factory() as session:
+        session.add(_mapping(per_session_settings, status="pending", captain_active=True))
+        await session.commit()
+        await _process(
+            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+
+        chatwoot.create_conversation.assert_not_awaited()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_conversation_id == 200
+        # The funnel labels of the session in progress are not reset.
+        assert "bot-venda-pre-inscricao" in mapping.chatwoot_labels
+
+
+@pytest.mark.asyncio
+async def test_conversation_without_real_messages_is_reused(
+    session_factory, per_session_settings
+) -> None:
+    """A retry between creating the conversation and starting the session, or a fresh one."""
+    chatwoot = _chatwoot_with_history()
+    chatwoot.get_messages.return_value = [{"id": 1, "message_type": 2, "content": "status"}]
+    async with session_factory() as session:
+        session.add(_mapping(per_session_settings, status="pending"))
+        await session.commit()
+        await _process(
+            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+
+        chatwoot.create_conversation.assert_not_awaited()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_conversation_id == 200
+        assert mapping.captain_active is True
+
+
+@pytest.mark.asyncio
+async def test_first_contact_creates_one_conversation_only(
+    session_factory, per_session_settings
+) -> None:
+    chatwoot = _chatwoot()
+    async with session_factory() as session:
+        await _process(
+            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.create_conversation.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_the_message_was_posted_keeps_the_new_conversation(
+    session_factory, per_session_settings
+) -> None:
+    chatwoot = _chatwoot_with_history()
+    async with session_factory() as session:
+        session.add(_mapping(per_session_settings, status="resolved", chatwoot_conversation_id=201))
+        event = _customer_event()
+        event.result_id = "300"
+        await _process(
+            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, event
+        )
+        chatwoot.create_conversation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_without_the_switch_the_conversation_is_reused(
+    session_factory, captain_settings
+) -> None:
+    chatwoot = _chatwoot_with_history()
+    async with session_factory() as session:
+        session.add(_mapping(captain_settings, status="resolved"))
+        await session.commit()
+        await _process(
+            session, captain_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
+        )
+        chatwoot.create_conversation.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_night_window_entry_gets_a_new_conversation(
+    session_factory, per_session_settings
+) -> None:
+    per_session_settings.captain_follow_master_state = True
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot_with_history()
+    async with session_factory() as session:
+        session.add(_mapping(per_session_settings, status="resolved"))
+        await session.commit()
+        await _process(session, per_session_settings, blip, chatwoot, _customer_event("boa noite"))
+
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_conversation_id == 201
+        assert mapping.captain_active is True
+
+
+@pytest.mark.asyncio
+async def test_returning_customer_of_a_finished_session_keeps_the_conversation(
+    session_factory, per_session_settings
+) -> None:
+    """Only an entry (icebreaker, night window) starts a new conversation; "oi" after a link
+    stays in the session's conversation, which the Captain still has the context of."""
+    per_session_settings.captain_follow_master_state = True
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot_with_history()
+    async with session_factory() as session:
+        session.add(_mapping(per_session_settings, status="resolved", captain_active=True))
+        await session.commit()
+        await _process(session, per_session_settings, blip, chatwoot, _customer_event("já paguei"))
+
+        chatwoot.create_conversation.assert_not_awaited()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.chatwoot_conversation_id == 200
+        assert mapping.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_events_of_a_replaced_conversation_are_ignored(
+    session_factory, per_session_settings
+) -> None:
+    chatwoot = _chatwoot_with_history()
+    blip = AsyncMock(spec=BlipClient)
+    async with session_factory() as session:
+        session.add(
+            _mapping(
+                per_session_settings, status="pending", captain_active=True,
+                chatwoot_conversation_id=201,
+            )
+        )
+        await session.commit()
+        event = _chatwoot_message(conversation={"id": 200})
+        await _process(session, per_session_settings, blip, chatwoot, event)
+
+        assert event.status == "ignored"
+        blip.send_message.assert_not_awaited()
+
+
 @pytest.fixture
 def follow_settings(captain_settings: Settings) -> Settings:
     captain_settings.captain_follow_master_state = True

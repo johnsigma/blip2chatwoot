@@ -112,17 +112,25 @@ class BridgeService:
                 # BLiP decides who is with the Captain (icebreaker, night window, ...): follow it.
                 in_captain = await self._captain_state(customer_identity, ref=message.id)
                 captain_trigger = in_captain is True
+            continuing = mapping is not None and self._captain_session_ongoing(mapping)
             if not mapping:
                 mapping = await self._create_mapping(
                     customer_identity, keep_pending=captain_trigger
                 )
             elif direction == "inbound" and not captain_trigger and mapping.status != "open":
                 await self._reopen_for_customer(mapping)
+            elif (
+                captain_trigger
+                and event.result_id is None
+                and self.settings.captain_new_conversation_per_session
+                and not continuing
+            ):
+                await self._start_new_conversation(mapping)
 
             if captain_trigger and event.result_id is None:
                 # Before the message is posted: the Captain only answers `pending` conversations
                 # and reacts to the message itself, so this can't wait for an automation rule.
-                await self._start_captain_session(mapping)
+                await self._start_captain_session(mapping, new_session=not continuing)
 
             await self._ensure_shadow_ticket(mapping)
 
@@ -630,8 +638,48 @@ class BridgeService:
             return False
         return normalize_phrase(message.content) in phrases
 
-    async def _start_captain_session(self, mapping: ConversationMapping) -> None:
+    @staticmethod
+    def _captain_session_ongoing(mapping: ConversationMapping) -> bool:
+        # The Captain is working on this conversation right now: the customer is mid-session.
+        return mapping.captain_active and mapping.status == "pending"
+
+    async def _start_new_conversation(self, mapping: ConversationMapping) -> None:
+        """Point the customer's mapping at a brand-new conversation for the coming session.
+
+        A conversation without a real message yet (a retry of this very step, or one just made for
+        a first-time customer) is reused instead of piling up empty ones.
+        """
+        messages = await self.chatwoot.get_messages(
+            conversation_id=mapping.chatwoot_conversation_id
+        )
+        if not any(message.get("message_type") not in (2, "activity") for message in messages):
+            return
+        conversation = await self.chatwoot.create_conversation(
+            source_id=mapping.chatwoot_source_id,
+            contact_id=mapping.chatwoot_contact_id,
+        )
+        conversation_id = self._required_int(conversation, "id", "Chatwoot conversation")
+        logger.info(
+            "New Captain session for mapping %s: conversation %s replaces %s",
+            mapping.id,
+            conversation_id,
+            mapping.chatwoot_conversation_id,
+        )
+        mapping.chatwoot_conversation_id = conversation_id
+        mapping.status = str(conversation.get("status") or "open")
+        mapping.chatwoot_labels = []
+        mapping.blip_tags = []
+        mapping.blip_ticket_id = None
+        mapping.blip_agent_identity = None
+        mapping.captain_active = False
+        await self.session.commit()
+
+    async def _start_captain_session(
+        self, mapping: ConversationMapping, *, new_session: bool = True
+    ) -> None:
         """Hand the conversation to the Captain: session labels, `pending`, session flag.
+
+        `new_session=False` (the customer repeats the icebreaker mid-session) keeps every label.
 
         Every step is idempotent, so a retry of the same icebreaker just finds them done. An open
         conversation goes `pending` too: the icebreaker means BLiP is holding the customer in the
@@ -639,7 +687,7 @@ class BridgeService:
         """
         conversation_id = mapping.chatwoot_conversation_id
         labels = self.settings.captain_session_label_list
-        prefixes = tuple(self.settings.captain_session_reset_prefix_list)
+        prefixes = tuple(self.settings.captain_session_reset_prefix_list) if new_session else ()
         if labels or prefixes:
             current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
             # The conversation is reused across sessions: drop what an earlier one left behind
