@@ -117,7 +117,7 @@ Two processes share one database and communicate only through it.
   come back inside a finished session keep the conversation (only entries start a new one). The optional
   `CAPTAIN_SESSION_RESET_LABEL_PREFIXES` is the fallback for reused conversations: it runs at session
   start and when `_reopen_for_customer` resumes a non-`pending` session for the Captain, but never mid-session.
-  **Start endpoint** (`CAPTAIN_START_PATH_TOKEN`, 404 when empty; `POST /webhooks/captain/start[/{token}]`): BLiP's
+  **Start endpoint** (`CAPTAIN_START_TOKEN`, 404 when empty; `POST /webhooks/captain/start`, header `X-Bridge-Token` only): BLiP's
   sub-bot reports each entry once (`identity`, optional `origin`/`message_id`/`content`), so no entry has to be
   guessed from the router state. `app/api.py` stores it as `captain_start` (dedupe by identity + message id, else
   the minute) → `process_captain_start`: bot nodes ignored; an ongoing session (`_captain_session_ongoing`) is a

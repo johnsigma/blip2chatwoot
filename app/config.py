@@ -49,12 +49,12 @@ class Settings(BaseSettings):
     # A customer message in a Captain conversation that isn't open keeps it `pending` only while
     # the router still has the customer there; otherwise the session ends and it opens as usual.
     captain_blip_subbot: str = ""
-    # `POST /webhooks/captain/start[/{token}]`: BLiP tells the bridge that it just handed a
+    # `POST /webhooks/captain/start`: BLiP tells the bridge that it just handed a
     # customer to the Captain's sub-bot (whatever the entry: icebreaker, night window, lead ads...),
     # with the customer's message and the origin. The bridge starts the session and posts that
-    # message, so the Captain answers it. Empty = endpoint off (404). The token goes in the path
-    # or in `X-Bridge-Token`.
-    captain_start_path_token: str = ""
+    # message, so the Captain answers it. Empty = endpoint off (404). The secret goes in the
+    # `X-Bridge-Token` header only (a token in the URL would end up in proxy and tunnel logs).
+    captain_start_token: str = ""
     # Label added at the start, `<prefix><origin>` (e.g. `origem-leadads`); empty = no origin label.
     captain_start_origin_label_prefix: str = "origem-"
     # Posted instead of the customer's text when it isn't sent, or when it is already in the
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
         if self.captain_enabled and not self.captain_blip_subbot.strip():
             raise ValueError(
                 "CAPTAIN_BLIP_SUBBOT is required when CAPTAIN_TRIGGER_PHRASES, "
-                "CAPTAIN_FOLLOW_MASTER_STATE or CAPTAIN_START_PATH_TOKEN is set"
+                "CAPTAIN_FOLLOW_MASTER_STATE or CAPTAIN_START_TOKEN is set"
             )
         return self
 
@@ -133,7 +133,7 @@ class Settings(BaseSettings):
         return (
             bool(self.captain_trigger_phrase_set)
             or self.captain_follow_master_state
-            or bool(self.captain_start_path_token)
+            or bool(self.captain_start_token)
         )
 
     @property

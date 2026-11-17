@@ -355,35 +355,40 @@ async def test_captain_start_is_off_without_a_token(session_factory, settings) -
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         response = await client.post(
-            "/webhooks/captain/start/anything", json={"identity": "5511@wa.gw.msging.net"}
+            "/webhooks/captain/start", json={"identity": "5511@wa.gw.msging.net"}
         )
     assert response.status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_captain_start_checks_the_token(session_factory, settings) -> None:
-    settings.captain_start_path_token = "start-secret"
+async def test_captain_start_needs_the_header_token(session_factory, settings) -> None:
+    settings.captain_start_token = "start-secret"
     settings.captain_blip_subbot = "sub@msging.net"
     app = _start_app(session_factory, settings)
     body = {"identity": "5511@wa.gw.msging.net"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        wrong = await client.post("/webhooks/captain/start/nope", json=body)
+        wrong = await client.post(
+            "/webhooks/captain/start", json=body, headers={"X-Bridge-Token": "nope"}
+        )
         missing = await client.post("/webhooks/captain/start", json=body)
+        in_the_url = await client.post("/webhooks/captain/start/start-secret", json=body)
         header = await client.post(
             "/webhooks/captain/start", json=body, headers={"X-Bridge-Token": "start-secret"}
         )
     assert wrong.status_code == 401
     assert missing.status_code == 401
+    assert in_the_url.status_code == 404  # no such route: the token is never accepted in the URL
     assert header.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_captain_start_enqueues_once_and_validates(session_factory, settings) -> None:
-    settings.captain_start_path_token = "start-secret"
+    settings.captain_start_token = "start-secret"
     settings.captain_blip_subbot = "sub@msging.net"
     app = _start_app(session_factory, settings)
+    auth = {"X-Bridge-Token": "start-secret"}
     body = {
         "identity": " 5511@wa.gw.msging.net ",
         "origin": "leadads",
@@ -394,9 +399,9 @@ async def test_captain_start_enqueues_once_and_validates(session_factory, settin
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
-        first = await client.post("/webhooks/captain/start/start-secret", json=body)
-        again = await client.post("/webhooks/captain/start/start-secret", json=body)
-        invalid = await client.post("/webhooks/captain/start/start-secret", json={"identity": "x"})
+        first = await client.post("/webhooks/captain/start", json=body, headers=auth)
+        again = await client.post("/webhooks/captain/start", json=body, headers=auth)
+        invalid = await client.post("/webhooks/captain/start", json={"identity": "x"}, headers=auth)
 
     assert first.status_code == 200
     assert first.json()["duplicate"] is False

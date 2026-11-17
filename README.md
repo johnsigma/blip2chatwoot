@@ -145,9 +145,9 @@ silent sub-bot:
   session starts or a finished one resumes (a resolved conversation the customer comes back to while
   still in the sub-bot), so old exit/funnel labels can't fire the exit automations again. Never
   mid-session. Labels in `CAPTAIN_SESSION_LABELS` are kept. Not needed with the switch above.
-- `CAPTAIN_START_PATH_TOKEN`: enables `POST /webhooks/captain/start/{token}` (or `/webhooks/captain/start`
-  with `X-Bridge-Token`); empty = 404. BLiP's sub-bot calls it once at its entry block, whatever sent the
-  customer there (icebreaker, night window, lead ads, ...), with JSON
+- `CAPTAIN_START_TOKEN`: enables `POST /webhooks/captain/start`, authenticated by the header
+  `X-Bridge-Token: <this value>` (never in the URL); empty = 404. BLiP's sub-bot calls it once at its entry block, whatever
+  sent the customer there (icebreaker, night window, lead ads, ...), with JSON
   `{"identity": "<n>@wa.gw.msging.net", "origin": "leadads", "message_id": "...", "content": "..."}`
   (only `identity` is required). The bridge starts the session as for an icebreaker (new conversation
   with `CAPTAIN_NEW_CONVERSATION_PER_SESSION`, labels, `pending`) and posts `content` as the customer's

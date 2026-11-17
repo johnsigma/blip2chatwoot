@@ -1041,7 +1041,7 @@ START_TOKEN = "start-secret"
 @pytest.fixture
 def start_settings(captain_settings: Settings) -> Settings:
     captain_settings.captain_trigger_phrases = ""
-    captain_settings.captain_start_path_token = START_TOKEN
+    captain_settings.captain_start_token = START_TOKEN
     captain_settings.captain_new_conversation_per_session = True
     return captain_settings
 
@@ -1077,9 +1077,9 @@ async def _start(session, settings, chatwoot, event, blip=None) -> None:
 
 
 def test_start_token_enables_the_captain_and_needs_the_subbot() -> None:
-    with pytest.raises(ValidationError, match="CAPTAIN_START_PATH_TOKEN"):
-        Settings(_env_file=None, captain_start_path_token="x")
-    settings = Settings(_env_file=None, captain_start_path_token="x", captain_blip_subbot=SUBBOT)
+    with pytest.raises(ValidationError, match="CAPTAIN_START_TOKEN"):
+        Settings(_env_file=None, captain_start_token="x")
+    settings = Settings(_env_file=None, captain_start_token="x", captain_blip_subbot=SUBBOT)
     assert settings.captain_enabled
 
 

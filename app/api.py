@@ -229,15 +229,12 @@ _ORIGIN_LIMIT = 40
 _START_TEXT_LIMIT = 4000
 
 
-async def _receive_captain_start(
-    request: Request,
-    session: AsyncSession,
-    path_token: str | None = None,
-) -> JSONResponse:
-    expected = _runtime(request).settings.captain_start_path_token
+async def _receive_captain_start(request: Request, session: AsyncSession) -> JSONResponse:
+    expected = _runtime(request).settings.captain_start_token
     if not expected:
         raise HTTPException(status_code=404, detail="Not found")
-    _check_blip_token(request, path_token, expected=expected)
+    # Header only: a token in the URL ends up in proxy and tunnel logs.
+    _check_blip_token(request, None, expected=expected)
     _, payload = await _json_body(request)
 
     identity = payload.get("identity")
@@ -277,15 +274,6 @@ async def receive_captain_start(
     session: AsyncSession = Depends(get_session),  # noqa: B008
 ) -> JSONResponse:
     return await _receive_captain_start(request, session)
-
-
-@router.post("/webhooks/captain/start/{path_token}")
-async def receive_captain_start_with_token(
-    path_token: str,
-    request: Request,
-    session: AsyncSession = Depends(get_session),  # noqa: B008
-) -> JSONResponse:
-    return await _receive_captain_start(request, session, path_token)
 
 
 @router.post("/webhooks/chatwoot")
