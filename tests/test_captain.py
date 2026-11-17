@@ -502,9 +502,7 @@ async def test_new_session_gets_a_new_conversation(
             session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, _customer_event()
         )
 
-        chatwoot.create_conversation.assert_awaited_once_with(
-            source_id="source-1", contact_id=100
-        )
+        chatwoot.create_conversation.assert_awaited_once_with(source_id="source-1", contact_id=100)
         mapping = await session.scalar(select(ConversationMapping))
         assert mapping.chatwoot_conversation_id == 201
         assert mapping.status == "pending"
@@ -581,9 +579,7 @@ async def test_retry_after_the_message_was_posted_keeps_the_new_conversation(
         session.add(_mapping(per_session_settings, status="resolved", chatwoot_conversation_id=201))
         event = _customer_event()
         event.result_id = "300"
-        await _process(
-            session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, event
-        )
+        await _process(session, per_session_settings, AsyncMock(spec=BlipClient), chatwoot, event)
         chatwoot.create_conversation.assert_not_awaited()
 
 
@@ -649,7 +645,9 @@ async def test_events_of_a_replaced_conversation_are_ignored(
     async with session_factory() as session:
         session.add(
             _mapping(
-                per_session_settings, status="pending", captain_active=True,
+                per_session_settings,
+                status="pending",
+                captain_active=True,
                 chatwoot_conversation_id=201,
             )
         )
