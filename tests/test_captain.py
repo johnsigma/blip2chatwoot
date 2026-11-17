@@ -1,5 +1,6 @@
 """Captain sessions started by a BLiP icebreaker (CAPTAIN_* settings)."""
 
+import json
 from unittest.mock import AsyncMock, call
 
 import httpx
@@ -191,6 +192,33 @@ async def test_retry_after_the_message_was_posted_does_not_restart_the_session(
         chatwoot.create_message.assert_not_awaited()
         mapping = await session.scalar(select(ConversationMapping))
         assert mapping.captain_active is False
+
+
+@pytest.mark.asyncio
+async def test_retry_after_a_half_started_session_does_not_repeat_the_steps(
+    session_factory, captain_settings
+) -> None:
+    """The labels were added but the status change failed: the retry finds them done."""
+    blip = AsyncMock(spec=BlipClient)
+    chatwoot = _chatwoot(conversation_status="open")
+    chatwoot.get_conversation_labels.side_effect = [[], ["camila", "bot-venda-inicio"]]
+    chatwoot.toggle_status.side_effect = IntegrationError("down", retryable=True, status_code=503)
+    async with session_factory() as session:
+        session.add(_mapping(captain_settings, status="open"))
+        await session.commit()
+        event = _customer_event()
+        with pytest.raises(IntegrationError):
+            await _process(session, captain_settings, blip, chatwoot, event)
+
+        chatwoot.toggle_status.side_effect = None
+        await _process(session, captain_settings, blip, chatwoot, event)
+
+        chatwoot.add_conversation_labels.assert_awaited_once()
+        chatwoot.toggle_status.assert_awaited()
+        chatwoot.create_message.assert_awaited_once()
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.captain_active is True
+        assert mapping.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -504,6 +532,32 @@ async def test_captain_reply_in_a_session_is_sent_to_blip_as_whatsapp_text(
 
 
 @pytest.mark.asyncio
+async def test_captain_media_caption_is_also_converted_to_whatsapp(
+    session_factory, captain_settings
+) -> None:
+    blip = AsyncMock(spec=BlipClient)
+    chatwoot = _chatwoot()
+    message = _chatwoot_message(
+        content="Veja o **material**",
+        attachments=[
+            {
+                "file_type": "image",
+                "content_type": "image/png",
+                "data_url": "https://chatwoot.example/file.png",
+            }
+        ],
+    )
+    async with session_factory() as session:
+        session.add(_mapping(captain_settings, status="pending", captain_active=True))
+        await session.commit()
+        await _process(session, captain_settings, blip, chatwoot, message)
+
+        sent = blip.send_message.await_args.kwargs
+        assert sent["message_type"] == "application/vnd.lime.media-link+json"
+        assert sent["content"]["text"] == "Veja o *material*"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("active", "switch", "overrides"),
     [
@@ -521,9 +575,7 @@ async def test_captain_reply_is_not_forwarded_outside_a_session(
     async with session_factory() as session:
         session.add(_mapping(captain_settings, captain_active=active))
         await session.commit()
-        await _process(
-            session, captain_settings, blip, _chatwoot(), _chatwoot_message(**overrides)
-        )
+        await _process(session, captain_settings, blip, _chatwoot(), _chatwoot_message(**overrides))
         blip.send_message.assert_not_awaited()
 
 
@@ -549,6 +601,7 @@ async def test_captain_switch_does_not_forward_human_agents(
     ("status_code", "body", "expected"),
     [
         (200, {"status": "success", "resource": SUBBOT}, SUBBOT),
+        (200, {"status": "success", "resource": None}, None),
         (200, {"status": "failure", "reason": {"code": 67, "description": "not found"}}, None),
         (404, {"status": "failure"}, None),
     ],
@@ -568,7 +621,9 @@ async def test_master_state_lookup(settings, status_code, body, expected) -> Non
     sent = requests[0]
     assert sent.url.path.endswith("/commands")
     assert sent.headers["Authorization"] == "Key blip-key"
-    payload = __import__("json").loads(sent.content)
+    # On the hot path of every customer message: capped below the shared HTTP timeout.
+    assert sent.extensions["timeout"]["read"] == 5.0
+    payload = json.loads(sent.content)
     assert payload["to"] == "postmaster@msging.net"
     assert payload["method"] == "get"
     assert payload["uri"] == f"/contexts/{CUSTOMER}/master-state"

@@ -103,10 +103,11 @@ Two processes share one database and communicate only through it.
   `BlipClient.get_master_state` is `CAPTAIN_BLIP_SUBBOT` (an unreadable state keeps the Captain), else ends
   the session and opens it. `_process_chatwoot_message` forwards `sender.type == "captain_assistant"` public
   messages only with `CAPTAIN_REPLIES_TO_BLIP` and an active session (not subject to the agents' allow-list),
-  converted by `app/services/whatsapp_format.py`. With `CAPTAIN_FOLLOW_MASTER_STATE` the session also starts
-  for any inbound message (not just a phrase) when the customer has no active session and
-  `_captain_state` finds the router `master-state` at `CAPTAIN_BLIP_SUBBOT` (BLiP owns the decision, e.g. a
-  night window); unreadable = no session (unlike `_reopen_for_customer`, where unreadable keeps it).
+  converted by `app/services/whatsapp_format.py` (text and media captions). With `CAPTAIN_FOLLOW_MASTER_STATE`
+  the session also starts for any inbound message (not just a phrase) when the customer has no active session
+  and `_captain_state` finds the router `master-state` at `CAPTAIN_BLIP_SUBBOT` (BLiP owns the decision, e.g. a
+  night window; the read is capped at 5 s); unreadable = no session (unlike `_reopen_for_customer`, where
+  unreadable keeps it). An icebreaker moves even an `open` conversation to `pending`.
 
 **Webhook auth**: Chatwoot uses an HMAC signature + timestamp (`app/security.py`), enforced only if
 `CHATWOOT_WEBHOOK_SECRET` is set. BLiP has no signature, so it uses a route path token (or

@@ -363,8 +363,8 @@ class BridgeService:
             await self.session.commit()
 
         message_type, content = self._chatwoot_outbound_content(payload)
-        if captain and message_type == "text/plain" and isinstance(content, str):
-            content = markdown_to_whatsapp(content)
+        if captain:
+            content = self._captain_outbound_content(message_type, content)
         await self.blip.send_message(
             to=mapping.blip_customer_identity,
             message_type=message_type,
@@ -633,7 +633,9 @@ class BridgeService:
     async def _start_captain_session(self, mapping: ConversationMapping) -> None:
         """Hand the conversation to the Captain: session labels, `pending`, session flag.
 
-        Every step is idempotent, so a retry of the same icebreaker just finds them done.
+        Every step is idempotent, so a retry of the same icebreaker just finds them done. An open
+        conversation goes `pending` too: the icebreaker means BLiP is holding the customer in the
+        Captain's sub-bot, so the Captain takes over from there.
         """
         conversation_id = mapping.chatwoot_conversation_id
         labels = self.settings.captain_session_label_list
@@ -677,9 +679,10 @@ class BridgeService:
     async def _customer_still_with_captain(self, mapping: ConversationMapping) -> bool:
         # Unknown: keep the Captain, so the customer is answered (at worst twice) rather than
         # left in a silent sub-bot with nobody reading the conversation.
-        return await self._captain_state(
-            mapping.blip_customer_identity, ref=f"mapping {mapping.id}"
-        ) is not False
+        return (
+            await self._captain_state(mapping.blip_customer_identity, ref=f"mapping {mapping.id}")
+            is not False
+        )
 
     async def _captain_state(self, customer_identity: str, *, ref: str) -> bool | None:
         """Whether the router has the customer in the Captain's sub-bot; None when unreadable."""
@@ -1162,6 +1165,17 @@ class BridgeService:
         if caption:
             link["text"] = "\n".join(caption)
         return _MEDIA_LINK_TYPE, link
+
+    @staticmethod
+    def _captain_outbound_content(message_type: str, content: Any) -> Any:
+        """The Captain writes Markdown; BLiP carries plain text and media captions only."""
+        if message_type == "text/plain" and isinstance(content, str):
+            return markdown_to_whatsapp(content)
+        if message_type == _MEDIA_LINK_TYPE and isinstance(content, dict):
+            caption = content.get("text")
+            if isinstance(caption, str):
+                return {**content, "text": markdown_to_whatsapp(caption)}
+        return content
 
     @staticmethod
     def _chatwoot_content_as_text(payload: dict[str, Any]) -> str:

@@ -131,19 +131,20 @@ them. To let the Captain attend customers who send a campaign icebreaker while B
 silent sub-bot:
 
 - `CAPTAIN_TRIGGER_PHRASES`: exact icebreaker phrases, `|`-separated (case and repeated spaces are
-  ignored). Empty turns the whole feature off.
+  ignored). Empty (and with `CAPTAIN_FOLLOW_MASTER_STATE` off) turns the whole feature off.
 - `CAPTAIN_SESSION_LABELS`: comma-separated labels added at the icebreaker.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
   `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
 - `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router
   has the customer in `CAPTAIN_BLIP_SUBBOT` (e.g. a night window BLiP turns on and off on its side),
   not only for the phrases. Costs one `master-state` read per customer message that has no active
-  session; an unreadable state starts nothing and the next message tries again.
+  session (capped at 5 s); an unreadable state starts nothing and the next message tries again.
 - `CAPTAIN_REPLIES_TO_BLIP`: forward the Captain's public messages (sender
-  `captain_assistant`) to the customer. Independent of `CHATWOOT_REPLIES_TO_BLIP` and its allow-list,
-  which keep covering human agents.
+  `captain_assistant`) to the customer. Independent of `CHATWOOT_REPLIES_TO_BLIP`; the
+  `CHATWOOT_REPLIES_ALLOWED_CONVERSATIONS` allow-list still bounds human agents only.
 
 When a customer sends an icebreaker, the bridge adds the labels, puts the conversation in `pending`
+(also when it was open with an agent: the phrase means BLiP is holding the customer in the sub-bot)
 and marks the mapping as a Captain session, all **before** posting the message, so the Captain
 answers the icebreaker itself. Later customer messages in that conversation, when it isn't open
 (the Captain resolved it), read the router's `master-state` (`get /contexts/<customer>/master-state`
@@ -152,8 +153,8 @@ conversation goes back to `pending`; otherwise (BLiP expiry, an exit handled by 
 and it opens for the agents as usual. If BLiP can't be read, the Captain keeps the conversation. An
 open conversation (after the Captain's handoff) is left alone. The Captain's messages are sent as
 `text/plain` with its Markdown turned into WhatsApp formatting (`**bold**` → `*bold*`, links as
-`text: url`). Moving the customer out of the sub-bot when the Captain hands off or ends is not the
-bridge's job (it's done by whatever reacts to the Captain's labels).
+`text: url`; media captions included). Moving the customer out of the sub-bot when the Captain
+hands off or ends is not the bridge's job (it's done by whatever reacts to the Captain's labels).
 
 ## BLiP configuration
 

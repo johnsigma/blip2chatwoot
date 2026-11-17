@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from urllib.parse import quote
 from uuid import uuid4
@@ -9,11 +10,18 @@ import httpx
 from app.config import Settings
 from app.integrations.errors import IntegrationError
 
+logger = logging.getLogger(__name__)
 _DESK_NODE_SUFFIX = "@desk.msging.net"
 _ATTENDANT_PAGE_SIZE = 100
 _MAX_ATTENDANT_PAGES = 20
-# BLiP command failure code for a resource (e.g. a context variable) that doesn't exist.
+# BLiP's generic "the requested resource was not found" command failure. For `master-state` a
+# missing context variable is the normal case (the customer is in the router's main flow), but the
+# same code also covers other not-found resources, so the description is logged to tell them apart.
 _RESOURCE_NOT_FOUND = 67
+# The master-state read sits on the hot path of every customer message with
+# CAPTAIN_FOLLOW_MASTER_STATE, so it is capped at 5 s (and never above the shared client timeout):
+# a slow BLiP delays that message instead of holding the customer's lock longer.
+_MASTER_STATE_TIMEOUT_SECONDS = 5.0
 
 
 class BlipClient:
@@ -111,7 +119,11 @@ class BlipClient:
             "uri": f"/contexts/{quote(customer_identity, safe='@._-')}/master-state",
         }
         try:
-            response = await self._post(self.commands_url, payload)
+            response = await self._post(
+                self.commands_url,
+                payload,
+                timeout=min(_MASTER_STATE_TIMEOUT_SECONDS, self.settings.http_timeout_seconds),
+            )
         except IntegrationError as exc:
             if exc.status_code == 404:
                 return None
@@ -119,6 +131,11 @@ class BlipClient:
         if response.get("status") == "failure":
             reason = response.get("reason") or {}
             if reason.get("code") == _RESOURCE_NOT_FOUND:
+                logger.debug(
+                    "BLiP has no master-state for %s: %s",
+                    customer_identity,
+                    reason.get("description", "unknown error"),
+                )
                 return None
             raise IntegrationError(
                 f"BLiP master-state lookup failed: {reason.get('description', 'unknown error')}",
@@ -190,19 +207,23 @@ class BlipClient:
         payload: dict[str, Any],
         *,
         auth_key: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         key = auth_key or self.settings.blip_auth_key
         if not self.settings.blip_contract_id or not key:
             raise IntegrationError("BLiP credentials are not configured", retryable=False)
+        request_kwargs: dict[str, Any] = {
+            "json": payload,
+            "headers": {
+                "Authorization": f"Key {key}",
+                "Content-Type": "application/json",
+            },
+        }
+        if timeout is not None:
+            # httpx treats `timeout=None` as "no timeout"; omitting it keeps the client's default.
+            request_kwargs["timeout"] = timeout
         try:
-            response = await self._client.post(
-                url,
-                json=payload,
-                headers={
-                    "Authorization": f"Key {key}",
-                    "Content-Type": "application/json",
-                },
-            )
+            response = await self._client.post(url, **request_kwargs)
         except httpx.TimeoutException as exc:
             raise IntegrationError(f"BLiP request timed out: {exc}", retryable=True) from exc
         except httpx.RequestError as exc:
