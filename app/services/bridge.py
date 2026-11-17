@@ -290,13 +290,21 @@ class BridgeService:
         if status and not self._is_monotonic_delivery_status(delivery.status, status):
             status = None
         if status:
-            await self.chatwoot.update_message_status(
-                conversation_id=mapping.chatwoot_conversation_id,
-                message_id=delivery.chatwoot_message_id,
-                status=status,
-                external_error=(notification.reason or {}).get("description"),
-            )
-            delivery.status = status
+            try:
+                await self.chatwoot.update_message_status(
+                    conversation_id=mapping.chatwoot_conversation_id,
+                    message_id=delivery.chatwoot_message_id,
+                    status=status,
+                    external_error=(notification.reason or {}).get("description"),
+                )
+            except IntegrationError as exc:
+                if exc.status_code != 404 or not self.settings.captain_new_conversation_per_session:
+                    raise
+                # The message belongs to a conversation a newer Captain session has replaced; the
+                # mapping only knows the current one, so there is nothing to update.
+                logger.info("Delivery update for a message of a replaced conversation: ignored")
+            else:
+                delivery.status = status
             await self.session.commit()
 
         event.status = "processed"

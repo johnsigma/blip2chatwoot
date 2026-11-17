@@ -661,6 +661,47 @@ async def test_events_of_a_replaced_conversation_are_ignored(
         blip.send_message.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("switch", "ignored"), [(True, True), (False, False)])
+async def test_delivery_notice_for_a_replaced_conversation_is_not_an_error(
+    session_factory, per_session_settings, switch, ignored
+) -> None:
+    per_session_settings.captain_new_conversation_per_session = switch
+    chatwoot = _chatwoot()
+    chatwoot.update_message_status.side_effect = IntegrationError(
+        "not found", status_code=404, retryable=False
+    )
+    async with session_factory() as session:
+        mapping = _mapping(per_session_settings, chatwoot_conversation_id=201)
+        session.add(mapping)
+        await session.commit()
+        session.add(
+            MessageDelivery(
+                mapping_id=mapping.id, chatwoot_message_id=300, blip_message_id="b-1", status="sent"
+            )
+        )
+        event = InboundEvent(
+            provider="blip",
+            external_id="notification:b-1:consumed",
+            event_type="notification",
+            payload={"id": "b-1", "from": CUSTOMER, "event": "consumed"},
+        )
+        session.add(event)
+        await session.commit()
+        service = BridgeService(
+            session=session,
+            settings=per_session_settings,
+            blip=AsyncMock(spec=BlipClient),
+            chatwoot=chatwoot,
+        )
+        if ignored:
+            await service.process_blip_notification(event)
+            assert event.status == "processed"
+        else:
+            with pytest.raises(IntegrationError):
+                await service.process_blip_notification(event)
+
+
 @pytest.fixture
 def follow_settings(captain_settings: Settings) -> Settings:
     captain_settings.captain_follow_master_state = True
