@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -222,6 +223,69 @@ async def _enqueue_blip_notification(
         status_code=200,
         content={"accepted": True, "duplicate": not created, "event_id": event.id},
     )
+
+
+_ORIGIN_LIMIT = 40
+_START_TEXT_LIMIT = 4000
+
+
+async def _receive_captain_start(
+    request: Request,
+    session: AsyncSession,
+    path_token: str | None = None,
+) -> JSONResponse:
+    expected = _runtime(request).settings.captain_start_path_token
+    if not expected:
+        raise HTTPException(status_code=404, detail="Not found")
+    _check_blip_token(request, path_token, expected=expected)
+    _, payload = await _json_body(request)
+
+    identity = payload.get("identity")
+    if not isinstance(identity, str) or "@" not in identity.strip():
+        raise HTTPException(status_code=422, detail="`identity` must be a BLiP node")
+    identity = identity.strip()
+    fields: dict[str, str] = {"identity": identity}
+    for key, limit in (
+        ("origin", _ORIGIN_LIMIT),
+        ("message_id", 255),
+        ("content", _START_TEXT_LIMIT),
+    ):
+        value = payload.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            fields[key] = str(value).strip()[:limit]
+
+    # Retries of the same call collapse: by the message when it has an id, else by the minute.
+    key = fields.get("message_id") or f"t{int(time.time() // 60)}"
+    event, created = await enqueue_event(
+        session,
+        provider="captain",
+        external_id=f"captain_start:{identity}:{key}",
+        delivery_id=None,
+        event_type="captain_start",
+        payload=fields,
+        job_kind="captain_start",
+    )
+    return JSONResponse(
+        status_code=200,
+        content={"accepted": True, "duplicate": not created, "event_id": event.id},
+    )
+
+
+@router.post("/webhooks/captain/start")
+async def receive_captain_start(
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> JSONResponse:
+    return await _receive_captain_start(request, session)
+
+
+@router.post("/webhooks/captain/start/{path_token}")
+async def receive_captain_start_with_token(
+    path_token: str,
+    request: Request,
+    session: AsyncSession = Depends(get_session),  # noqa: B008
+) -> JSONResponse:
+    return await _receive_captain_start(request, session, path_token)
 
 
 @router.post("/webhooks/chatwoot")

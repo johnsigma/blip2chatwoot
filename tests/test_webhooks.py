@@ -339,3 +339,77 @@ async def test_blip_webhook_has_no_route_at_the_root(session_factory, settings) 
     assert base.status_code == 200
     async with session_factory() as session:
         assert len((await session.scalars(select(InboundEvent))).all()) == 1
+
+
+def _start_app(session_factory, settings) -> FastAPI:
+    app = FastAPI()
+    app.include_router(router)
+    app.state.runtime = SimpleNamespace(settings=settings, session_factory=session_factory)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_captain_start_is_off_without_a_token(session_factory, settings) -> None:
+    app = _start_app(session_factory, settings)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/webhooks/captain/start/anything", json={"identity": "5511@wa.gw.msging.net"}
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_captain_start_checks_the_token(session_factory, settings) -> None:
+    settings.captain_start_path_token = "start-secret"
+    settings.captain_blip_subbot = "sub@msging.net"
+    app = _start_app(session_factory, settings)
+    body = {"identity": "5511@wa.gw.msging.net"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        wrong = await client.post("/webhooks/captain/start/nope", json=body)
+        missing = await client.post("/webhooks/captain/start", json=body)
+        header = await client.post(
+            "/webhooks/captain/start", json=body, headers={"X-Bridge-Token": "start-secret"}
+        )
+    assert wrong.status_code == 401
+    assert missing.status_code == 401
+    assert header.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_captain_start_enqueues_once_and_validates(session_factory, settings) -> None:
+    settings.captain_start_path_token = "start-secret"
+    settings.captain_blip_subbot = "sub@msging.net"
+    app = _start_app(session_factory, settings)
+    body = {
+        "identity": " 5511@wa.gw.msging.net ",
+        "origin": "leadads",
+        "message_id": 123,
+        "content": "Oi",
+        "ignored": "x",
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first = await client.post("/webhooks/captain/start/start-secret", json=body)
+        again = await client.post("/webhooks/captain/start/start-secret", json=body)
+        invalid = await client.post("/webhooks/captain/start/start-secret", json={"identity": "x"})
+
+    assert first.status_code == 200
+    assert first.json()["duplicate"] is False
+    assert again.json()["duplicate"] is True
+    assert invalid.status_code == 422
+    async with session_factory() as session:
+        event = await session.scalar(select(InboundEvent))
+        assert event.event_type == "captain_start"
+        assert event.payload == {
+            "identity": "5511@wa.gw.msging.net",
+            "origin": "leadads",
+            "message_id": "123",
+            "content": "Oi",
+        }
+        job = await session.scalar(select(OutboxJob))
+        assert job.kind == "captain_start"
