@@ -141,9 +141,10 @@ silent sub-bot:
   (a reply typed there never reaches BLiP). Default off. A customer who comes back inside a finished
   session ("já paguei" after the link) stays in that session's conversation.
 - `CAPTAIN_SESSION_RESET_LABEL_PREFIXES`: optional fallback for a conversation that is reused (the
-  switch above off, or mid-session excluded): comma-separated label prefixes (e.g. `saida-,bot-venda-`)
-  removed when a new session starts, so old exit/funnel labels can't fire the exit automations again.
-  Labels in `CAPTAIN_SESSION_LABELS` are kept. Not needed with the switch above.
+  switch above off): comma-separated label prefixes (e.g. `saida-,bot-venda-`) removed when a new
+  session starts or a finished one resumes (a resolved conversation the customer comes back to while
+  still in the sub-bot), so old exit/funnel labels can't fire the exit automations again. Never
+  mid-session. Labels in `CAPTAIN_SESSION_LABELS` are kept. Not needed with the switch above.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
   `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
 - `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router

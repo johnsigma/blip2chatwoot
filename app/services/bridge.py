@@ -693,33 +693,45 @@ class BridgeService:
         conversation goes `pending` too: the icebreaker means BLiP is holding the customer in the
         Captain's sub-bot, so the Captain takes over from there.
         """
-        conversation_id = mapping.chatwoot_conversation_id
-        labels = self.settings.captain_session_label_list
-        prefixes = tuple(self.settings.captain_session_reset_prefix_list) if new_session else ()
-        if labels or prefixes:
-            current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
-            # The conversation is reused across sessions: drop what an earlier one left behind
-            # (exit and funnel labels) before the new session's labels are added.
-            kept = [
-                label
-                for label in current
-                if label in labels or not (prefixes and label.startswith(prefixes))
-            ]
-            target = self._unique(kept + labels)
-            if sorted(target) != sorted(current):
-                missing = [label for label in labels if label not in current]
-                if missing:
-                    await self.chatwoot.ensure_labels(missing)
-                await self.chatwoot.add_conversation_labels(
-                    conversation_id=conversation_id,
-                    labels=target,
-                )
-            mapping.chatwoot_labels = target
+        await self._sync_session_labels(mapping, reset_stale=new_session)
         if mapping.status != "pending":
-            await self.chatwoot.toggle_status(conversation_id=conversation_id, status="pending")
+            await self.chatwoot.toggle_status(
+                conversation_id=mapping.chatwoot_conversation_id, status="pending"
+            )
             mapping.status = "pending"
         mapping.captain_active = True
         await self.session.commit()
+
+    async def _sync_session_labels(
+        self, mapping: ConversationMapping, *, reset_stale: bool
+    ) -> None:
+        """Add `CAPTAIN_SESSION_LABELS`, optionally dropping what an earlier session left behind.
+
+        The conversation is reused across sessions: exit and funnel labels of a previous session
+        would otherwise fire the exit automations again on the next resolve. Labels in
+        `CAPTAIN_SESSION_LABELS` are always kept, even when they match a reset prefix.
+        """
+        labels = self.settings.captain_session_label_list
+        prefixes = tuple(self.settings.captain_session_reset_prefix_list) if reset_stale else ()
+        if not labels and not prefixes:
+            return
+        conversation_id = mapping.chatwoot_conversation_id
+        current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
+        kept = [
+            label
+            for label in current
+            if label in labels or not (prefixes and label.startswith(prefixes))
+        ]
+        target = self._unique(kept + labels)
+        if sorted(target) != sorted(current):
+            missing = [label for label in labels if label not in current]
+            if missing:
+                await self.chatwoot.ensure_labels(missing)
+            await self.chatwoot.add_conversation_labels(
+                conversation_id=conversation_id,
+                labels=target,
+            )
+        mapping.chatwoot_labels = target
 
     async def _reopen_for_customer(self, mapping: ConversationMapping) -> None:
         """A customer wrote in a conversation that isn't open.
@@ -732,6 +744,12 @@ class BridgeService:
         if mapping.captain_active:
             if await self._customer_still_with_captain(mapping):
                 status = "pending"
+                if mapping.status != "pending":
+                    # The session had ended (e.g. resolved after an exit handled by n8n) and the
+                    # customer came back while BLiP still has them in the sub-bot: this is a new
+                    # turn, so clean the labels the previous one left instead of leaving them to
+                    # fire the exit automation again. A mid-session message is left alone.
+                    await self._sync_session_labels(mapping, reset_stale=True)
             else:
                 mapping.captain_active = False
         if mapping.status != status:

@@ -38,8 +38,9 @@ class Settings(BaseSettings):
     # without the earlier sessions in its context. The old conversation stays in Chatwoot but is
     # no longer mapped: events for it are ignored, so replies typed there never reach BLiP.
     captain_new_conversation_per_session: bool = False
-    # Comma-separated label prefixes (e.g. "saida-,bot-venda-") removed when a session starts in a
-    # conversation that is reused (CAPTAIN_NEW_CONVERSATION_PER_SESSION off, or mid-session).
+    # Comma-separated label prefixes (e.g. "saida-,bot-venda-") removed when a session starts, or a
+    # finished one resumes, in a conversation that is reused (CAPTAIN_NEW_CONVERSATION_PER_SESSION
+    # off). Never mid-session.
     # Exit/funnel labels left by an earlier session would otherwise fire the exit automations again
     # (a link sent today resolves the conversation and a stale `saida-*` label sends the customer
     # away). Labels in CAPTAIN_SESSION_LABELS are kept even if they match.

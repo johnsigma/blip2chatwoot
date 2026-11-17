@@ -312,6 +312,8 @@ async def test_pending_session_with_the_customer_still_there_is_left_alone(
         await session.commit()
         await _process(session, captain_settings, blip, chatwoot, _customer_event("quero IA"))
         chatwoot.toggle_status.assert_not_awaited()
+        # Never mid-session: the labels of the session in progress are left alone.
+        chatwoot.add_conversation_labels.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -392,6 +394,34 @@ async def test_new_session_drops_the_exit_and_funnel_labels_of_the_previous_one(
 
 
 @pytest.mark.asyncio
+async def test_finished_session_resumed_for_the_captain_drops_the_stale_labels(
+    session_factory, reset_settings
+) -> None:
+    """A night-window re-entry keeps the conversation but must not keep the exit label.
+
+    The exit automation resolved the conversation and left `saida-sair`; `captain_active` was
+    never cleared (the bridge only clears it when a message finds the customer out of the sub-bot),
+    so the returning customer goes through `_reopen_for_customer`, not a session start.
+    """
+    reset_settings.captain_follow_master_state = True
+    blip = AsyncMock(spec=BlipClient)
+    blip.get_master_state.return_value = SUBBOT
+    chatwoot = _chatwoot(labels=["vip", "saida-sair", "bot-venda-link-enviado", "camila"])
+    async with session_factory() as session:
+        session.add(_mapping(reset_settings, status="resolved", captain_active=True))
+        await session.commit()
+        await _process(session, reset_settings, blip, chatwoot, _customer_event("já paguei"))
+
+        chatwoot.add_conversation_labels.assert_awaited_once_with(
+            conversation_id=200, labels=["vip", "camila", "bot-venda-inicio"]
+        )
+        mapping = await session.scalar(select(ConversationMapping))
+        assert mapping.status == "pending"
+        assert mapping.captain_active is True
+        assert mapping.chatwoot_labels == ["vip", "camila", "bot-venda-inicio"]
+
+
+@pytest.mark.asyncio
 async def test_session_labels_matching_a_reset_prefix_are_kept(
     session_factory, reset_settings
 ) -> None:
@@ -450,9 +480,6 @@ async def test_retry_of_the_same_icebreaker_does_not_touch_labels_again(
         )
         chatwoot.add_conversation_labels.assert_not_awaited()
         chatwoot.ensure_labels.assert_not_awaited()
-
-
-# --- BLiP decides (night window): CAPTAIN_FOLLOW_MASTER_STATE ----------------------------------
 
 
 # --- a new conversation per session ------------------------------------------------------------
@@ -698,6 +725,9 @@ async def test_delivery_notice_for_a_replaced_conversation_is_not_an_error(
         else:
             with pytest.raises(IntegrationError):
                 await service.process_blip_notification(event)
+
+
+# --- BLiP decides (night window): CAPTAIN_FOLLOW_MASTER_STATE ----------------------------------
 
 
 @pytest.fixture

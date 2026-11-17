@@ -115,7 +115,8 @@ Two processes share one database and communicate only through it.
   current one has no non-activity message yet, which also makes a retry safe); the old conversation is simply
   unmapped, so `process_chatwoot_event` ignores its events (replies typed there never reach BLiP). Customers who
   come back inside a finished session keep the conversation (only entries start a new one). The optional
-  `CAPTAIN_SESSION_RESET_LABEL_PREFIXES` is the fallback for reused conversations; it never runs mid-session.
+  `CAPTAIN_SESSION_RESET_LABEL_PREFIXES` is the fallback for reused conversations: it runs at session
+  start and when `_reopen_for_customer` resumes a non-`pending` session for the Captain, but never mid-session.
 
 **Webhook auth**: Chatwoot uses an HMAC signature + timestamp (`app/security.py`), enforced only if
 `CHATWOOT_WEBHOOK_SECRET` is set. BLiP has no signature, so it uses a route path token (or
