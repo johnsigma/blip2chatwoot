@@ -133,6 +133,18 @@ silent sub-bot:
 - `CAPTAIN_TRIGGER_PHRASES`: exact icebreaker phrases, `|`-separated (case and repeated spaces are
   ignored). Empty (and with `CAPTAIN_FOLLOW_MASTER_STATE` off) turns the whole feature off.
 - `CAPTAIN_SESSION_LABELS`: comma-separated labels added at the icebreaker.
+- `CAPTAIN_NEW_CONVERSATION_PER_SESSION`: open a new Chatwoot conversation whenever a session starts
+  (icebreaker, or the router putting the customer in the sub-bot) unless the customer is mid-session
+  (`pending` with an active session). Each session keeps its own labels, notes and history and the
+  Captain starts without the earlier ones in its context; a conversation with no real message yet is
+  reused. The old conversation stays in Chatwoot but is no longer mapped, so events for it are ignored
+  (a reply typed there never reaches BLiP). Default off. A customer who comes back inside a finished
+  session ("já paguei" after the link) stays in that session's conversation.
+- `CAPTAIN_SESSION_RESET_LABEL_PREFIXES`: optional fallback for a conversation that is reused (the
+  switch above off): comma-separated label prefixes (e.g. `saida-,bot-venda-`) removed when a new
+  session starts or a finished one resumes (a resolved conversation the customer comes back to while
+  still in the sub-bot), so old exit/funnel labels can't fire the exit automations again. Never
+  mid-session. Labels in `CAPTAIN_SESSION_LABELS` are kept. Not needed with the switch above.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
   `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
 - `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router

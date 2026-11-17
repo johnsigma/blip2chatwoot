@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     captain_trigger_phrases: str = ""
     # Comma-separated labels added at the icebreaker (e.g. "camila,bot-venda-inicio").
     captain_session_labels: str = ""
+    # Open a new Chatwoot conversation when a Captain session starts (icebreaker, or the router
+    # putting the customer in the sub-bot) unless the customer is mid-session (`pending`, session
+    # active). Each session then has its own labels, notes and history, and the Captain starts
+    # without the earlier sessions in its context. The old conversation stays in Chatwoot but is
+    # no longer mapped: events for it are ignored, so replies typed there never reach BLiP.
+    captain_new_conversation_per_session: bool = False
+    # Comma-separated label prefixes (e.g. "saida-,bot-venda-") removed when a session starts, or a
+    # finished one resumes, in a conversation that is reused (CAPTAIN_NEW_CONVERSATION_PER_SESSION
+    # off). Never mid-session.
+    # Exit/funnel labels left by an earlier session would otherwise fire the exit automations again
+    # (a link sent today resolves the conversation and a stale `saida-*` label sends the customer
+    # away). Labels in CAPTAIN_SESSION_LABELS are kept even if they match.
+    captain_session_reset_label_prefixes: str = ""
     # Router `master-state` value meaning "the customer is in the Captain's (silent) sub-bot".
     # A customer message in a Captain conversation that isn't open keeps it `pending` only while
     # the router still has the customer there; otherwise the session ends and it opens as usual.
@@ -112,6 +125,11 @@ class Settings(BaseSettings):
     def captain_session_label_list(self) -> list[str]:
         labels = (item.strip() for item in self.captain_session_labels.split(","))
         return list(dict.fromkeys(label for label in labels if label))
+
+    @property
+    def captain_session_reset_prefix_list(self) -> list[str]:
+        prefixes = (item.strip() for item in self.captain_session_reset_label_prefixes.split(","))
+        return list(dict.fromkeys(prefix for prefix in prefixes if prefix))
 
     @property
     def chatwoot_reply_conversation_ids(self) -> frozenset[int]:

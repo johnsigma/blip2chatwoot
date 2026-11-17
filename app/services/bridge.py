@@ -112,17 +112,25 @@ class BridgeService:
                 # BLiP decides who is with the Captain (icebreaker, night window, ...): follow it.
                 in_captain = await self._captain_state(customer_identity, ref=message.id)
                 captain_trigger = in_captain is True
+            continuing = mapping is not None and self._captain_session_ongoing(mapping)
             if not mapping:
                 mapping = await self._create_mapping(
                     customer_identity, keep_pending=captain_trigger
                 )
             elif direction == "inbound" and not captain_trigger and mapping.status != "open":
                 await self._reopen_for_customer(mapping)
+            elif (
+                captain_trigger
+                and event.result_id is None
+                and self.settings.captain_new_conversation_per_session
+                and not continuing
+            ):
+                await self._start_new_conversation(mapping)
 
             if captain_trigger and event.result_id is None:
                 # Before the message is posted: the Captain only answers `pending` conversations
                 # and reacts to the message itself, so this can't wait for an automation rule.
-                await self._start_captain_session(mapping)
+                await self._start_captain_session(mapping, new_session=not continuing)
 
             await self._ensure_shadow_ticket(mapping)
 
@@ -282,13 +290,21 @@ class BridgeService:
         if status and not self._is_monotonic_delivery_status(delivery.status, status):
             status = None
         if status:
-            await self.chatwoot.update_message_status(
-                conversation_id=mapping.chatwoot_conversation_id,
-                message_id=delivery.chatwoot_message_id,
-                status=status,
-                external_error=(notification.reason or {}).get("description"),
-            )
-            delivery.status = status
+            try:
+                await self.chatwoot.update_message_status(
+                    conversation_id=mapping.chatwoot_conversation_id,
+                    message_id=delivery.chatwoot_message_id,
+                    status=status,
+                    external_error=(notification.reason or {}).get("description"),
+                )
+            except IntegrationError as exc:
+                if exc.status_code != 404 or not self.settings.captain_new_conversation_per_session:
+                    raise
+                # The message belongs to a conversation a newer Captain session has replaced; the
+                # mapping only knows the current one, so there is nothing to update.
+                logger.info("Delivery update for a message of a replaced conversation: ignored")
+            else:
+                delivery.status = status
             await self.session.commit()
 
         event.status = "processed"
@@ -630,30 +646,92 @@ class BridgeService:
             return False
         return normalize_phrase(message.content) in phrases
 
-    async def _start_captain_session(self, mapping: ConversationMapping) -> None:
+    @staticmethod
+    def _captain_session_ongoing(mapping: ConversationMapping) -> bool:
+        # The Captain is working on this conversation right now: the customer is mid-session.
+        return mapping.captain_active and mapping.status == "pending"
+
+    async def _start_new_conversation(self, mapping: ConversationMapping) -> None:
+        """Point the customer's mapping at a brand-new conversation for the coming session.
+
+        A conversation without a real message yet (a retry of this very step, or one just made for
+        a first-time customer) is reused instead of piling up empty ones.
+        """
+        messages = await self.chatwoot.get_messages(
+            conversation_id=mapping.chatwoot_conversation_id
+        )
+        if not any(message.get("message_type") not in (2, "activity") for message in messages):
+            return
+        conversation = await self.chatwoot.create_conversation(
+            source_id=mapping.chatwoot_source_id,
+            contact_id=mapping.chatwoot_contact_id,
+        )
+        conversation_id = self._required_int(conversation, "id", "Chatwoot conversation")
+        logger.info(
+            "New Captain session for mapping %s: conversation %s replaces %s",
+            mapping.id,
+            conversation_id,
+            mapping.chatwoot_conversation_id,
+        )
+        mapping.chatwoot_conversation_id = conversation_id
+        mapping.status = str(conversation.get("status") or "open")
+        mapping.chatwoot_labels = []
+        mapping.blip_tags = []
+        mapping.blip_ticket_id = None
+        mapping.blip_agent_identity = None
+        mapping.captain_active = False
+        await self.session.commit()
+
+    async def _start_captain_session(
+        self, mapping: ConversationMapping, *, new_session: bool = True
+    ) -> None:
         """Hand the conversation to the Captain: session labels, `pending`, session flag.
+
+        `new_session=False` (the customer repeats the icebreaker mid-session) keeps every label.
 
         Every step is idempotent, so a retry of the same icebreaker just finds them done. An open
         conversation goes `pending` too: the icebreaker means BLiP is holding the customer in the
         Captain's sub-bot, so the Captain takes over from there.
         """
-        conversation_id = mapping.chatwoot_conversation_id
-        labels = self.settings.captain_session_label_list
-        if labels:
-            current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
-            missing = [label for label in labels if label not in current]
-            if missing:
-                await self.chatwoot.ensure_labels(missing)
-                await self.chatwoot.add_conversation_labels(
-                    conversation_id=conversation_id,
-                    labels=self._unique(current + missing),
-                )
-            mapping.chatwoot_labels = self._unique(current + missing)
+        await self._sync_session_labels(mapping, reset_stale=new_session)
         if mapping.status != "pending":
-            await self.chatwoot.toggle_status(conversation_id=conversation_id, status="pending")
+            await self.chatwoot.toggle_status(
+                conversation_id=mapping.chatwoot_conversation_id, status="pending"
+            )
             mapping.status = "pending"
         mapping.captain_active = True
         await self.session.commit()
+
+    async def _sync_session_labels(
+        self, mapping: ConversationMapping, *, reset_stale: bool
+    ) -> None:
+        """Add `CAPTAIN_SESSION_LABELS`, optionally dropping what an earlier session left behind.
+
+        The conversation is reused across sessions: exit and funnel labels of a previous session
+        would otherwise fire the exit automations again on the next resolve. Labels in
+        `CAPTAIN_SESSION_LABELS` are always kept, even when they match a reset prefix.
+        """
+        labels = self.settings.captain_session_label_list
+        prefixes = tuple(self.settings.captain_session_reset_prefix_list) if reset_stale else ()
+        if not labels and not prefixes:
+            return
+        conversation_id = mapping.chatwoot_conversation_id
+        current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
+        kept = [
+            label
+            for label in current
+            if label in labels or not (prefixes and label.startswith(prefixes))
+        ]
+        target = self._unique(kept + labels)
+        if sorted(target) != sorted(current):
+            missing = [label for label in labels if label not in current]
+            if missing:
+                await self.chatwoot.ensure_labels(missing)
+            await self.chatwoot.add_conversation_labels(
+                conversation_id=conversation_id,
+                labels=target,
+            )
+        mapping.chatwoot_labels = target
 
     async def _reopen_for_customer(self, mapping: ConversationMapping) -> None:
         """A customer wrote in a conversation that isn't open.
@@ -666,6 +744,12 @@ class BridgeService:
         if mapping.captain_active:
             if await self._customer_still_with_captain(mapping):
                 status = "pending"
+                if mapping.status != "pending":
+                    # The session had ended (e.g. resolved after an exit handled by n8n) and the
+                    # customer came back while BLiP still has them in the sub-bot: this is a new
+                    # turn, so clean the labels the previous one left instead of leaving them to
+                    # fire the exit automation again. A mid-session message is left alone.
+                    await self._sync_session_labels(mapping, reset_stale=True)
             else:
                 mapping.captain_active = False
         if mapping.status != status:
