@@ -1,7 +1,17 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -39,6 +49,11 @@ class ConversationMapping(Base):
     chatwoot_labels: Mapped[list[str]] = mapped_column(JsonType, default=list, nullable=False)
     blip_tags: Mapped[list[str]] = mapped_column(JsonType, default=list, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="open", nullable=False)
+    # A Captain session started by an icebreaker (CAPTAIN_TRIGGER_PHRASES) and not yet ended. Kept
+    # here, not as a Chatwoot label, because the Captain can wipe labels it did not set.
+    captain_active: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings
+from app.config import Settings, normalize_phrase
 from app.integrations.blip import BlipClient
 from app.integrations.chatwoot import ChatwootClient
 from app.integrations.errors import IntegrationError
@@ -24,6 +24,7 @@ from app.models import ConversationMapping, InboundEvent, MessageDelivery
 from app.schemas import BlipMessage, BlipNotification
 from app.services.contact_profile import PHONE_LIKE, latest_contact_event
 from app.services.queue import utcnow
+from app.services.whatsapp_format import markdown_to_whatsapp
 
 logger = logging.getLogger(__name__)
 _MAPPING_LOCKS: dict[str, asyncio.Lock] = {}
@@ -97,18 +98,31 @@ class BridgeService:
             await self._mark_ignored(event)
             return
 
+        captain_trigger = direction == "inbound" and self._is_captain_trigger(message)
         lock = _MAPPING_LOCKS.setdefault(customer_identity, asyncio.Lock())
         async with lock:
             mapping = await self._get_mapping(customer_identity)
+            if (
+                not captain_trigger
+                and direction == "inbound"
+                and self.settings.captain_follow_master_state
+                and event.result_id is None
+                and not (mapping and mapping.captain_active)
+            ):
+                # BLiP decides who is with the Captain (icebreaker, night window, ...): follow it.
+                in_captain = await self._captain_state(customer_identity, ref=message.id)
+                captain_trigger = in_captain is True
             if not mapping:
-                mapping = await self._create_mapping(customer_identity)
-            elif direction == "inbound" and mapping.status != "open":
-                await self.chatwoot.toggle_status(
-                    conversation_id=mapping.chatwoot_conversation_id,
-                    status="open",
+                mapping = await self._create_mapping(
+                    customer_identity, keep_pending=captain_trigger
                 )
-                mapping.status = "open"
-                await self.session.commit()
+            elif direction == "inbound" and not captain_trigger and mapping.status != "open":
+                await self._reopen_for_customer(mapping)
+
+            if captain_trigger and event.result_id is None:
+                # Before the message is posted: the Captain only answers `pending` conversations
+                # and reacts to the message itself, so this can't wait for an automation rule.
+                await self._start_captain_session(mapping)
 
             await self._ensure_shadow_ticket(mapping)
 
@@ -297,15 +311,20 @@ class BridgeService:
         mapping: ConversationMapping,
         payload: dict[str, Any],
     ) -> None:
-        if not self.settings.chatwoot_replies_to_blip:
-            return
-        if not self._is_public_agent_message(payload):
+        captain = self._is_captain_message(payload)
+        if captain:
+            # Gated by its own switch and the session, not by the agents' reply switch/allow-list.
+            if not (self.settings.captain_replies_to_blip and mapping.captain_active):
+                return
+        elif not self.settings.chatwoot_replies_to_blip or not self._is_public_agent_message(
+            payload
+        ):
             return
         message_id = self._optional_int(payload.get("id"))
         if message_id is None:
             return
         allowed = self.settings.chatwoot_reply_conversation_ids
-        if allowed and mapping.chatwoot_conversation_id not in allowed:
+        if not captain and allowed and mapping.chatwoot_conversation_id not in allowed:
             logger.info(
                 "Reply in Chatwoot conversation %s not forwarded: not in "
                 "CHATWOOT_REPLIES_ALLOWED_CONVERSATIONS",
@@ -344,6 +363,8 @@ class BridgeService:
             await self.session.commit()
 
         message_type, content = self._chatwoot_outbound_content(payload)
+        if captain:
+            content = self._captain_outbound_content(message_type, content)
         await self.blip.send_message(
             to=mapping.blip_customer_identity,
             message_type=message_type,
@@ -429,7 +450,9 @@ class BridgeService:
         mapping.blip_tags = current_tags
         await self.session.commit()
 
-    async def _create_mapping(self, customer_identity: str) -> ConversationMapping:
+    async def _create_mapping(
+        self, customer_identity: str, *, keep_pending: bool = False
+    ) -> ConversationMapping:
         phone_number = self._phone_number_from_identity(customer_identity)
         contact = await self.chatwoot.create_contact(
             name=phone_number or customer_identity,
@@ -492,7 +515,8 @@ class BridgeService:
             if existing:
                 return existing
             raise
-        await self._open_pending_conversation(mapping)
+        if not keep_pending:
+            await self._open_pending_conversation(mapping)
         await self._apply_deferred_contact_profile(mapping)
         return mapping
 
@@ -599,6 +623,78 @@ class BridgeService:
                 "Could not create optional BLiP shadow ticket for mapping %s",
                 mapping.id,
             )
+
+    def _is_captain_trigger(self, message: BlipMessage) -> bool:
+        phrases = self.settings.captain_trigger_phrase_set
+        if not phrases or message.type != "text/plain" or not isinstance(message.content, str):
+            return False
+        return normalize_phrase(message.content) in phrases
+
+    async def _start_captain_session(self, mapping: ConversationMapping) -> None:
+        """Hand the conversation to the Captain: session labels, `pending`, session flag.
+
+        Every step is idempotent, so a retry of the same icebreaker just finds them done. An open
+        conversation goes `pending` too: the icebreaker means BLiP is holding the customer in the
+        Captain's sub-bot, so the Captain takes over from there.
+        """
+        conversation_id = mapping.chatwoot_conversation_id
+        labels = self.settings.captain_session_label_list
+        if labels:
+            current = await self.chatwoot.get_conversation_labels(conversation_id=conversation_id)
+            missing = [label for label in labels if label not in current]
+            if missing:
+                await self.chatwoot.ensure_labels(missing)
+                await self.chatwoot.add_conversation_labels(
+                    conversation_id=conversation_id,
+                    labels=self._unique(current + missing),
+                )
+            mapping.chatwoot_labels = self._unique(current + missing)
+        if mapping.status != "pending":
+            await self.chatwoot.toggle_status(conversation_id=conversation_id, status="pending")
+            mapping.status = "pending"
+        mapping.captain_active = True
+        await self.session.commit()
+
+    async def _reopen_for_customer(self, mapping: ConversationMapping) -> None:
+        """A customer wrote in a conversation that isn't open.
+
+        In an active Captain session it goes (back) to `pending` for the Captain while the BLiP
+        router still has the customer in the Captain's sub-bot; anywhere else the session is over
+        (expiry, `#sair` handled by BLiP, a handoff) and it opens for the agents, as always.
+        """
+        status = "open"
+        if mapping.captain_active:
+            if await self._customer_still_with_captain(mapping):
+                status = "pending"
+            else:
+                mapping.captain_active = False
+        if mapping.status != status:
+            await self.chatwoot.toggle_status(
+                conversation_id=mapping.chatwoot_conversation_id,
+                status=status,
+            )
+            mapping.status = status
+        await self.session.commit()
+
+    async def _customer_still_with_captain(self, mapping: ConversationMapping) -> bool:
+        # Unknown: keep the Captain, so the customer is answered (at worst twice) rather than
+        # left in a silent sub-bot with nobody reading the conversation.
+        return (
+            await self._captain_state(mapping.blip_customer_identity, ref=f"mapping {mapping.id}")
+            is not False
+        )
+
+    async def _captain_state(self, customer_identity: str, *, ref: str) -> bool | None:
+        """Whether the router has the customer in the Captain's sub-bot; None when unreadable."""
+        try:
+            state = await self.blip.get_master_state(customer_identity)
+        except IntegrationError as exc:
+            logger.warning(
+                "Could not read the BLiP master-state (%s, HTTP %s)", ref, exc.status_code
+            )
+            return None
+        subbot = self.settings.captain_blip_subbot.strip().lower()
+        return bool(state) and state.partition("/")[0].strip().lower() == subbot
 
     async def _open_pending_conversation(self, mapping: ConversationMapping) -> None:
         """Open a conversation Chatwoot created as `pending`.
@@ -813,6 +909,16 @@ class BridgeService:
         """Desk agents arrive as ``user%40example.com@blip.ai``; show the plain e-mail."""
         name = unquote(str(identity))
         return name.removesuffix("@blip.ai")
+
+    @staticmethod
+    def _is_captain_message(payload: dict[str, Any]) -> bool:
+        """A public message by the Chatwoot Captain (AI assistant), not one mirrored from BLiP."""
+        if payload.get("message_type") != "outgoing" or payload.get("private") is True:
+            return False
+        if (payload.get("content_attributes") or {}).get("blip_message_id"):
+            return False
+        sender_type = str((payload.get("sender") or {}).get("type", "")).lower()
+        return sender_type == "captain_assistant"
 
     @staticmethod
     def _is_public_agent_message(payload: dict[str, Any]) -> bool:
@@ -1059,6 +1165,17 @@ class BridgeService:
         if caption:
             link["text"] = "\n".join(caption)
         return _MEDIA_LINK_TYPE, link
+
+    @staticmethod
+    def _captain_outbound_content(message_type: str, content: Any) -> Any:
+        """The Captain writes Markdown; BLiP carries plain text and media captions only."""
+        if message_type == "text/plain" and isinstance(content, str):
+            return markdown_to_whatsapp(content)
+        if message_type == _MEDIA_LINK_TYPE and isinstance(content, dict):
+            caption = content.get("text")
+            if isinstance(caption, str):
+                return {**content, "text": markdown_to_whatsapp(caption)}
+        return content
 
     @staticmethod
     def _chatwoot_content_as_text(payload: dict[str, Any]) -> str:

@@ -24,10 +24,11 @@ alembic upgrade head       # needed before starting against Postgres when AUTO_C
 
 A **read-only mirror by default**: everything BLiP sends is copied into a Chatwoot API inbox — customer
 messages as `incoming`, bot and BLiP Desk agent messages as `outgoing` posted with the Agent Bot token
-(`CHATWOOT_AGENT_BOT_TOKEN`). Calling BLiP at all is opt-in via four independent switches (see
+(`CHATWOOT_AGENT_BOT_TOKEN`). Calling BLiP at all is opt-in via independent switches (see
 `Settings.blip_writes_enabled`): `BLIP_ACK_MESSAGES` (`consumed`/`failed` notifications),
 `CHATWOOT_REPLIES_TO_BLIP` (public agent replies → BLiP), `BLIP_TICKET_TAG_SYNC_ENABLED` (labels ⇄
-Desk ticket tags) and `BLIP_AGENT_NAME_LOOKUP` (read-only `get /attendants`). Any new code that calls
+Desk ticket tags), `BLIP_AGENT_NAME_LOOKUP` (read-only `get /attendants`) and the Captain settings
+(`CAPTAIN_TRIGGER_PHRASES` and `CAPTAIN_FOLLOW_MASTER_STATE` read the router `master-state`; `CAPTAIN_REPLIES_TO_BLIP`). Any new code that calls
 `BlipClient` must sit behind one of them. Commands to `postmaster@desk.msging.net` use
 `BLIP_DESK_AUTH_KEY` when set (the main bot's key may have no Desk configured), else `BLIP_AUTH_KEY`.
 Two processes share one database and communicate only through it.
@@ -93,6 +94,20 @@ Two processes share one database and communicate only through it.
   Chatwoot returned and `_open_pending_conversation` toggles `pending` to `open`; if that fails the mapping
   stays `pending` and the customer's next message reopens it. Other statuses (e.g. `resolved` for a
   blocked contact) are left alone.
+- **Captain sessions** (`CAPTAIN_*`, off while `CAPTAIN_TRIGGER_PHRASES` is empty and `CAPTAIN_FOLLOW_MASTER_STATE` is false): an inbound
+  `text/plain` equal to a phrase (`normalize_phrase`) makes `process_blip_message` run
+  `_start_captain_session` *before* `_mirror_message` (labels, `pending`, `ConversationMapping.captain_active`),
+  and `_create_mapping(keep_pending=True)` skips `_open_pending_conversation`; skipped on a retry once
+  `result_id` is set. The session lives in the DB column, not in the label, because the Captain can wipe
+  labels. `_reopen_for_customer` keeps a non-open session conversation `pending` only while
+  `BlipClient.get_master_state` is `CAPTAIN_BLIP_SUBBOT` (an unreadable state keeps the Captain), else ends
+  the session and opens it. `_process_chatwoot_message` forwards `sender.type == "captain_assistant"` public
+  messages only with `CAPTAIN_REPLIES_TO_BLIP` and an active session (not subject to the agents' allow-list),
+  converted by `app/services/whatsapp_format.py` (text and media captions). With `CAPTAIN_FOLLOW_MASTER_STATE`
+  the session also starts for any inbound message (not just a phrase) when the customer has no active session
+  and `_captain_state` finds the router `master-state` at `CAPTAIN_BLIP_SUBBOT` (BLiP owns the decision, e.g. a
+  night window; the read is capped at 5 s); unreadable = no session (unlike `_reopen_for_customer`, where
+  unreadable keeps it). An icebreaker moves even an `open` conversation to `pending`.
 
 **Webhook auth**: Chatwoot uses an HMAC signature + timestamp (`app/security.py`), enforced only if
 `CHATWOOT_WEBHOOK_SECRET` is set. BLiP has no signature, so it uses a route path token (or
@@ -161,7 +176,7 @@ and without `{path_token}`) remain. Without the path token only the header authe
   and the message falls back to a text link; timeouts/429/5xx raise a retryable `IntegrationError`.
 - Schema: `AUTO_CREATE_SCHEMA=true` runs `Base.metadata.create_all` at startup (dev/SQLite). Production
   uses Alembic — changing `app/models.py` requires a hand-checked new revision under
-  `migrations/versions/` (`0001_initial`, `0002_conversation_agent`). `migrations/env.py` takes the DB URL
+  `migrations/versions/` (`0001_initial`, `0002_conversation_agent`, `0003_captain_session`). `migrations/env.py` takes the DB URL
   from `Settings`, not `alembic.ini`. `create_all` never alters an existing table, so an old SQLite dev DB
   needs `alembic upgrade head` (or an `ALTER TABLE`) after a model change.
 - `BLIP_TICKET_TAG_SYNC_ENABLED` (default off) gates shadow BLiP Desk tickets and label sync; failures
