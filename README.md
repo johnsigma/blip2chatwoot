@@ -155,9 +155,11 @@ silent sub-bot:
   already mirrored, it posts `CAPTAIN_START_FALLBACK_TEXT` instead. A call while a session is ongoing
   (the icebreaker got there first) does nothing. `origin` becomes the label
   `CAPTAIN_START_ORIGIN_LABEL_PREFIX` + origin (default `origem-`; empty prefix = no label). Replaces
-  polling `master-state` for new entries: with it, `CAPTAIN_FOLLOW_MASTER_STATE` isn't needed.
+  polling `master-state` for new entries: with it, `CAPTAIN_FOLLOW_MASTER_STATE` isn't needed, but
+  the `CAPTAIN_BLIP_SUBBOT` read on returning customers stays.
 - `CAPTAIN_BLIP_SUBBOT`: the router's `master-state` for that sub-bot (e.g.
-  `mysubbot@msging.net`). Required with the phrases or with `CAPTAIN_FOLLOW_MASTER_STATE`.
+  `mysubbot@msging.net`). Required with the phrases, with `CAPTAIN_FOLLOW_MASTER_STATE` or with
+  `CAPTAIN_START_TOKEN`.
 - `CAPTAIN_FOLLOW_MASTER_STATE`: also start the session for *any* customer message while the router
   has the customer in `CAPTAIN_BLIP_SUBBOT` (e.g. a night window BLiP turns on and off on its side),
   not only for the phrases. Costs one `master-state` read per customer message that has no active

@@ -42,7 +42,8 @@ def _check_blip_token(
     if not expected:
         return
     supplied = supplied_token or request.headers.get("X-Bridge-Token")
-    if not supplied or not hmac.compare_digest(supplied, expected):
+    # Compare bytes: ``compare_digest`` rejects non-ASCII ``str`` (a malformed header would 500).
+    if not supplied or not hmac.compare_digest(supplied.encode(), expected.encode()):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid webhook token",
@@ -227,6 +228,9 @@ async def _enqueue_blip_notification(
 
 _ORIGIN_LIMIT = 40
 _START_TEXT_LIMIT = 4000
+# `InboundEvent.external_id` is String(512) and also keys the dedupe; reject rather than overflow.
+_EXTERNAL_ID_LIMIT = 512
+_IDENTITY_LIMIT = 255
 
 
 async def _receive_captain_start(request: Request, session: AsyncSession) -> JSONResponse:
@@ -241,6 +245,8 @@ async def _receive_captain_start(request: Request, session: AsyncSession) -> JSO
     if not isinstance(identity, str) or "@" not in identity.strip():
         raise HTTPException(status_code=422, detail="`identity` must be a BLiP node")
     identity = identity.strip()
+    if len(identity) > _IDENTITY_LIMIT:
+        raise HTTPException(status_code=422, detail="`identity` is too long")
     fields: dict[str, str] = {"identity": identity}
     for key, limit in (
         ("origin", _ORIGIN_LIMIT),
@@ -253,10 +259,16 @@ async def _receive_captain_start(request: Request, session: AsyncSession) -> JSO
 
     # Retries of the same call collapse: by the message when it has an id, else by the minute.
     key = fields.get("message_id") or f"t{int(time.time() // 60)}"
+    external_id = f"captain_start:{identity}:{key}"
+    if len(external_id) > _EXTERNAL_ID_LIMIT:
+        raise HTTPException(
+            status_code=422,
+            detail="`identity` and `message_id` are too long together",
+        )
     event, created = await enqueue_event(
         session,
         provider="captain",
-        external_id=f"captain_start:{identity}:{key}",
+        external_id=external_id,
         delivery_id=None,
         event_type="captain_start",
         payload=fields,

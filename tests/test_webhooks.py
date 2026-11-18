@@ -377,10 +377,42 @@ async def test_captain_start_needs_the_header_token(session_factory, settings) -
         header = await client.post(
             "/webhooks/captain/start", json=body, headers={"X-Bridge-Token": "start-secret"}
         )
+        # A non-ASCII header must be a 401, not a TypeError from compare_digest.
+        non_ascii = await client.post(
+            "/webhooks/captain/start",
+            json=body,
+            headers={b"X-Bridge-Token": "é".encode("latin-1")},
+        )
     assert wrong.status_code == 401
     assert missing.status_code == 401
     assert in_the_url.status_code == 404  # no such route: the token is never accepted in the URL
+    assert non_ascii.status_code == 401
     assert header.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_captain_start_rejects_an_oversized_identity_or_dedupe_key(
+    session_factory, settings
+) -> None:
+    settings.captain_start_token = "start-secret"
+    settings.captain_blip_subbot = "sub@msging.net"
+    app = _start_app(session_factory, settings)
+    auth = {"X-Bridge-Token": "start-secret"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        oversized_identity = await client.post(
+            "/webhooks/captain/start",
+            json={"identity": f"{'a' * 250}@wa.gw.msging.net"},
+            headers=auth,
+        )
+        oversized_key = await client.post(
+            "/webhooks/captain/start",
+            json={"identity": f"{'a' * 250}@x", "message_id": "b" * 255},
+            headers=auth,
+        )
+    assert oversized_identity.status_code == 422
+    assert oversized_key.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -416,5 +448,6 @@ async def test_captain_start_enqueues_once_and_validates(session_factory, settin
             "message_id": "123",
             "content": "Oi",
         }
-        job = await session.scalar(select(OutboxJob))
-        assert job.kind == "captain_start"
+        jobs = (await session.scalars(select(OutboxJob))).all()
+        assert len(jobs) == 1
+        assert jobs[0].kind == "captain_start"

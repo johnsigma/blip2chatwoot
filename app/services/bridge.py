@@ -685,16 +685,20 @@ class BridgeService:
                     await self._mark_ignored(event)
                     return
 
-            already_mirrored = bool(
-                message_id
-                and await self.session.scalar(
-                    select(MessageDelivery.id).where(MessageDelivery.blip_message_id == message_id)
+            await self._ensure_shadow_ticket(mapping)
+            existing = None
+            if message_id:
+                # BLiP's own copy may have reached the bridge first and been mirrored as a normal
+                # incoming message, which records no MessageDelivery: look in this conversation.
+                # A new conversation is only created when the copy stayed in the previous one.
+                existing = await self._find_chatwoot_message(
+                    conversation_id=mapping.chatwoot_conversation_id,
+                    blip_message_id=message_id,
                 )
-            )
             attributes: dict[str, Any] = {"captain_start": True}
-            if already_mirrored or not message_id:
-                # BLiP's own copy of the message came first (or there is none): the Captain still
-                # needs a message to answer, so post the marker instead.
+            if existing is not None or not message_id:
+                # The copy is already here (or there is none): the Captain still needs a message
+                # to answer, so post the marker instead.
                 content = self.settings.captain_start_fallback_text
                 message_id = None
             else:
